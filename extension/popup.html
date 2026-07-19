@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0f172a;
+      color: #f1f5f9;
+      width: 320px;
+      padding: 16px;
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+    .logo {
+      width: 32px; height: 32px;
+      background: #4f46e5;
+      border-radius: 8px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 16px;
+    }
+    h1 { font-size: 14px; font-weight: 600; color: #f1f5f9; }
+    p.sub { font-size: 11px; color: #64748b; margin-top: 1px; }
+
+    /* Tab bar */
+    .tabs {
+      display: flex;
+      gap: 2px;
+      margin-bottom: 14px;
+      background: #1e293b;
+      border-radius: 8px;
+      padding: 3px;
+    }
+    .tab-btn {
+      flex: 1;
+      padding: 6px;
+      border: none;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      background: transparent;
+      color: #64748b;
+      transition: all 0.15s;
+    }
+    .tab-btn.active { background: #4f46e5; color: #fff; }
+    .tab-btn:hover:not(.active) { color: #cbd5e1; }
+
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
+
+    .field { margin-bottom: 10px; }
+    label { display: block; font-size: 11px; font-weight: 500; color: #94a3b8; margin-bottom: 4px; }
+    input, textarea {
+      width: 100%;
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 6px;
+      padding: 7px 9px;
+      font-size: 12px;
+      color: #f1f5f9;
+      outline: none;
+      resize: vertical;
+    }
+    input:focus, textarea:focus { border-color: #4f46e5; }
+    textarea { min-height: 80px; font-family: inherit; line-height: 1.5; }
+
+    .port-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+    .port-row label { margin: 0; white-space: nowrap; }
+    .port-row input { width: 70px; flex-shrink: 0; }
+
+    .btn {
+      width: 100%;
+      padding: 9px;
+      border-radius: 7px;
+      border: none;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.15s;
+    }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-primary { background: #4f46e5; color: #fff; }
+    .btn-primary:hover:not(:disabled) { background: #4338ca; }
+    .btn-secondary { background: #1e293b; color: #94a3b8; margin-top: 6px; font-weight: 500; }
+    .btn-secondary:hover:not(:disabled) { background: #334155; }
+    .btn-success { background: #166534; color: #86efac; margin-top: 6px; }
+    .btn-success:hover:not(:disabled) { background: #14532d; }
+    .btn-ai {
+      background: #0f2a1e;
+      color: #4ade80;
+      border: 1px solid #166534;
+      margin-top: 6px;
+      font-weight: 600;
+    }
+    .btn-ai:hover:not(:disabled) { background: #14532d; }
+
+    #status, #autofill-status {
+      margin-top: 10px;
+      padding: 8px 10px;
+      border-radius: 6px;
+      font-size: 12px;
+      display: none;
+    }
+    #status.success, #autofill-status.success { background: #14532d; color: #86efac; border: 1px solid #166534; }
+    #status.error,   #autofill-status.error   { background: #450a0a; color: #fca5a5; border: 1px solid #7f1d1d; }
+    #status.info,    #autofill-status.info    { background: #1e3a5f; color: #93c5fd; border: 1px solid #1e40af; }
+    #status.warning, #autofill-status.warning { background: #431407; color: #fdba74; border: 1px solid #9a3412; }
+
+    .not-linkedin {
+      text-align: center;
+      padding: 20px 0;
+      color: #475569;
+      font-size: 12px;
+      line-height: 1.6;
+    }
+    .not-linkedin strong { color: #94a3b8; display: block; margin-bottom: 4px; }
+
+    /* AI fallback section */
+    .ai-fallback {
+      margin-top: 10px;
+      border: 1px solid #1e3a5f;
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .ai-fallback-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 10px;
+      background: #0c1f3a;
+      cursor: pointer;
+      user-select: none;
+    }
+    .ai-fallback-header:hover { background: #132a4d; }
+    .ai-fallback-title {
+      font-size: 11px;
+      font-weight: 600;
+      color: #60a5fa;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .ai-badge {
+      background: #1d4ed8;
+      color: #bfdbfe;
+      font-size: 9px;
+      font-weight: 700;
+      padding: 1px 5px;
+      border-radius: 4px;
+      letter-spacing: 0.5px;
+    }
+    .ai-chevron {
+      color: #475569;
+      font-size: 10px;
+      transition: transform 0.2s;
+    }
+    .ai-chevron.open { transform: rotate(180deg); }
+    .ai-fallback-body {
+      padding: 10px;
+      background: #0f172a;
+      display: none;
+    }
+    .ai-fallback-body.open { display: block; }
+    .ai-hint {
+      font-size: 11px;
+      color: #64748b;
+      margin-bottom: 8px;
+      line-height: 1.5;
+    }
+    #paste-area {
+      min-height: 100px;
+      font-size: 11px;
+      color: #cbd5e1;
+      border-color: #1e3a5f;
+    }
+    #paste-area:focus { border-color: #3b82f6; }
+    #parse-btn { margin-top: 8px; }
+    .spinner {
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      border: 2px solid rgba(74,222,128,0.3);
+      border-top-color: #4ade80;
+      border-radius: 50%;
+      animation: spin 0.6s linear infinite;
+      margin-right: 6px;
+      vertical-align: middle;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Auto-fill tab styles */
+    .autofill-page-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 4px 8px;
+      border-radius: 6px;
+      font-size: 11px;
+      font-weight: 500;
+      margin-bottom: 12px;
+    }
+    .autofill-page-badge.app-page { background: #14532d; color: #86efac; border: 1px solid #166534; }
+    .autofill-page-badge.other-page { background: #1e3a5f; color: #93c5fd; border: 1px solid #1e40af; }
+    .autofill-page-badge.unknown-page { background: #1e293b; color: #64748b; border: 1px solid #334155; }
+
+    .section-label {
+      font-size: 10px;
+      font-weight: 600;
+      color: #475569;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 8px;
+    }
+
+    .profile-preview {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      padding: 10px;
+      margin-bottom: 12px;
+      font-size: 11px;
+      color: #94a3b8;
+      line-height: 1.8;
+    }
+    .profile-preview .pf-name { color: #f1f5f9; font-weight: 600; font-size: 13px; margin-bottom: 2px; }
+    .profile-preview .pf-empty { color: #475569; font-style: italic; }
+
+    /* Resume upload prompt modal */
+    .resume-modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.6);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+    }
+    .resume-modal {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 12px;
+      padding: 16px;
+      width: 288px;
+    }
+    .resume-modal h3 { font-size: 13px; font-weight: 600; color: #f1f5f9; margin-bottom: 6px; }
+    .resume-modal p { font-size: 11px; color: #94a3b8; margin-bottom: 12px; line-height: 1.5; }
+    .modal-actions { display: flex; flex-direction: column; gap: 6px; }
+    .btn-modal-primary {
+      padding: 8px 12px;
+      border-radius: 7px;
+      border: none;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      text-align: left;
+      background: #4f46e5;
+      color: #fff;
+    }
+    .btn-modal-primary:hover { background: #4338ca; }
+    .btn-modal-secondary {
+      padding: 8px 12px;
+      border-radius: 7px;
+      border: 1px solid #334155;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      text-align: left;
+      background: transparent;
+      color: #94a3b8;
+    }
+    .btn-modal-secondary:hover { background: #334155; color: #f1f5f9; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="logo">📄</div>
+    <div>
+      <h1>Resume Tracker</h1>
+      <p class="sub" id="header-sub">Import Jobs & Auto Apply</p>
+    </div>
+  </div>
+
+  <!-- Tab bar -->
+  <div class="tabs">
+    <button class="tab-btn active" id="tab-import" data-tab="import">Import Job</button>
+    <button class="tab-btn" id="tab-autofill" data-tab="autofill">Auto-Fill</button>
+  </div>
+
+  <!-- ── Import Job tab ── -->
+  <div class="tab-panel active" id="panel-import">
+    <div id="not-linkedin" class="not-linkedin" style="display:none">
+      <strong>Not a LinkedIn job page</strong>
+      Navigate to a LinkedIn job posting<br>then click this extension.
+    </div>
+
+    <div id="main">
+      <div class="field">
+        <label>Company</label>
+        <input id="company" type="text" placeholder="Auto-detected..." />
+      </div>
+      <div class="field">
+        <label>Job Title</label>
+        <input id="title" type="text" placeholder="Auto-detected..." />
+      </div>
+      <div class="field">
+        <label>Job Description</label>
+        <textarea id="description" placeholder="Auto-detected..."></textarea>
+      </div>
+      <div class="field">
+        <label>Job Link</label>
+        <input id="job_link" type="text" readonly style="color:#64748b;font-size:11px" />
+      </div>
+
+      <div class="ai-fallback" id="ai-fallback">
+        <div class="ai-fallback-header" id="ai-toggle">
+          <span class="ai-fallback-title">
+            <span class="ai-badge">AI</span>
+            Manual paste fallback
+          </span>
+          <span class="ai-chevron" id="ai-chevron">▼</span>
+        </div>
+        <div class="ai-fallback-body" id="ai-body">
+          <p class="ai-hint">
+            Select all text on the job page (Ctrl+A / Cmd+A), copy it, paste below, and AI will extract the missing fields.
+          </p>
+          <textarea id="paste-area" placeholder="Paste full job posting text here…"></textarea>
+          <button class="btn btn-ai" id="parse-btn">Parse with AI</button>
+        </div>
+      </div>
+
+      <div class="port-row" style="margin-top:14px">
+        <label for="port">App port:</label>
+        <input id="port" type="number" value="3000" min="1" max="65535" />
+      </div>
+
+      <button class="btn btn-primary" id="send-btn">Add to Resume Tracker</button>
+      <button class="btn btn-secondary" id="open-btn">Open App</button>
+
+      <div id="status"></div>
+    </div>
+  </div>
+
+  <!-- ── Auto-Fill tab ── -->
+  <div class="tab-panel" id="panel-autofill">
+    <div id="autofill-page-status"></div>
+
+    <div id="profile-preview-area">
+      <div class="section-label">Profile loaded from app</div>
+      <div class="profile-preview" id="profile-preview">
+        <div class="pf-empty">Loading…</div>
+      </div>
+    </div>
+
+    <button class="btn btn-primary" id="fill-btn">Auto Apply</button>
+    <button class="btn btn-secondary" id="fill-fields-btn">Fill Fields Only</button>
+    <button class="btn btn-success" id="download-resume-btn">Download Resume (DOCX)</button>
+    <button class="btn btn-secondary" id="mark-applied-btn" style="display:none">Mark as Applied</button>
+    <button class="btn btn-secondary" id="open-profile-btn">Edit Profile in App</button>
+
+    <div id="active-job-badge" class="autofill-page-badge app-page" style="display:none;margin-bottom:10px"></div>
+
+    <div id="autofill-status"></div>
+
+    <!-- Resume upload choice modal (hidden by default) -->
+    <div id="resume-modal" style="display:none">
+      <div class="resume-modal-overlay">
+        <div class="resume-modal">
+          <h3>Resume Upload Field Detected</h3>
+          <p>
+            A resume upload field was found on this page. Would you like to download your generated DOCX to upload it, or handle the upload yourself?
+          </p>
+          <div class="modal-actions">
+            <button class="btn-modal-primary" id="modal-download-btn">Download Generated DOCX</button>
+            <button class="btn-modal-secondary" id="modal-manual-btn">I'll upload manually</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

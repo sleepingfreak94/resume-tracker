@@ -1,0 +1,31 @@
+---
+description: Keep resume Experience employers in reverse-chronological order
+globs: resumes/**/*.md
+alwaysApply: false
+---
+
+# Experience job order
+
+Always keep employers in reverse-chronological order (latest first, oldest last). Never reorder jobs by relevance to the JD.
+
+Correct order:
+
+1. Meazure Learning (Sep 2025 – Present)
+2. Infobyte Tech Solutions (Aug 2023 – Mar 2025)
+3. Becton Dickinson / BD (Feb 2020 – Aug 2023)
+4. Softprodigy (Aug 2017 – Aug 2019)
+
+```markdown
+<!-- ❌ BAD — BD jumped above Infobyte for healthcare relevance -->
+### Meazure Learning
+### Becton Dickinson
+### Infobyte Tech Solutions
+
+<!-- ✅ GOOD — dates decide order; tailor bullets inside each job instead -->
+### Meazure Learning
+### Infobyte Tech Solutions
+### Becton Dickinson
+### Softprodigy
+```
+
+You may reorder bullets within a job and emphasize Skills/Summary for the JD. Do not move employers.
