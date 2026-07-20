@@ -97,44 +97,72 @@ function isLinkedInSearchPage() {
   return /linkedin\.com\/jobs\/(?:search|search-results)\//.test(window.location.href);
 }
 
-function getSelectedJobUrl() {
+function getSelectedJobId() {
   const params = new URLSearchParams(window.location.search);
   const currentJobId = params.get("currentJobId");
-  if (currentJobId && /^\d+$/.test(currentJobId)) {
-    return `https://www.linkedin.com/jobs/view/${currentJobId}`;
-  }
+  if (currentJobId && /^\d+$/.test(currentJobId)) return currentJobId;
+
+  const currentUrl = cleanLinkedInJobUrl(window.location.href);
+  const currentMatch = currentUrl.match(/\/jobs\/view\/(\d+)/);
+  if (currentMatch) return currentMatch[1];
+
   const card = getSelectedSearchCard();
   const cardLink = card?.querySelector('a[href*="/jobs/view/"]');
   const cardUrl = cleanLinkedInJobUrl(cardLink?.href || "");
-  if (cardUrl) return cardUrl;
-  return cleanLinkedInJobUrl(window.location.href);
+  const cardMatch = cardUrl.match(/\/jobs\/view\/(\d+)/);
+  return cardMatch?.[1] || "";
+}
+
+function getSelectedJobUrl() {
+  const jobId = getSelectedJobId();
+  return jobId ? `https://www.linkedin.com/jobs/view/${jobId}` : "";
 }
 
 async function fetchSelectedJobDetails() {
+  const jobId = getSelectedJobId();
   const url = getSelectedJobUrl();
-  if (!url) return null;
-  try {
-    const response = await fetch(url, { credentials: "include" });
-    if (!response.ok) return null;
-    const html = await response.text();
-    const sourceDocument = new DOMParser().parseFromString(html, "text/html");
-    const structured = extractStructuredJob(sourceDocument);
-    if (structured) return { ...structured, url };
+  if (!jobId || !url) return null;
 
-    const title = cleanJobField(
-      sourceDocument.querySelector("h1.topcard__title, h1[class*='top-card-layout__title']")?.textContent
-    );
-    const company = cleanJobField(
-      sourceDocument.querySelector("a.topcard__org-name-link, a[class*='topcard__org-name-link']")?.textContent
-    );
-    const descriptionElement = sourceDocument.querySelector(
-      ".show-more-less-html__markup, .description__text--rich, section.description"
-    );
-    const description = cleanJobField(descriptionElement?.textContent);
-    return title && company && description.length > 100 ? { title, company, description, url } : null;
-  } catch {
-    return null;
+  // LinkedIn's signed-in search panel is virtualized and may not put the job
+  // description in the DOM. Its guest job endpoint returns a stable HTML
+  // fragment for the selected job ID and avoids the slow AI fallback.
+  const sources = [
+    `${window.location.origin}/jobs-guest/jobs/api/jobPosting/${jobId}`,
+    url,
+  ];
+
+  for (const source of sources) {
+    try {
+      const response = await fetch(source, { credentials: "include" });
+      if (!response.ok) continue;
+      const html = await response.text();
+      const sourceDocument = new DOMParser().parseFromString(html, "text/html");
+      const structured = extractStructuredJob(sourceDocument);
+      if (structured) return { ...structured, url };
+
+      const title = cleanJobField(
+        sourceDocument.querySelector(
+          "h1.topcard__title, h2.topcard__title, [class*='top-card-layout__title'], [class*='job-title'] h1"
+        )?.textContent
+      );
+      const company = cleanJobField(
+        sourceDocument.querySelector(
+          "a.topcard__org-name-link, a[class*='topcard__org-name-link'], [class*='company-name']"
+        )?.textContent
+      );
+      const descriptionElement = sourceDocument.querySelector(
+        ".show-more-less-html__markup, .description__text--rich, section.description, #job-details"
+      );
+      const description = cleanJobField(descriptionElement?.textContent);
+      if (title && company && description.length > 100) {
+        return { title, company, description, url };
+      }
+    } catch {
+      // Try the next source when LinkedIn blocks or changes one representation.
+    }
   }
+
+  return null;
 }
 
 function extractLinkedInJob() {
@@ -510,7 +538,7 @@ async function extractLinkedInJobWithRetry(maxAttempts = 10, delayMs = 400) {
     // Search-result pages sometimes render only cards, with no description
     // panel. Read the selected job's public detail page instead of sending the
     // entire results page to AI, which can confuse LinkedIn UI with the title.
-    if (!/\/jobs\/view\//.test(window.location.href) && !getFocusedJobPanel() && i === 0) {
+    if (!/\/jobs\/view\//.test(window.location.href) && i === 0) {
       const fetched = await fetchSelectedJobDetails();
       if (fetched) {
         return {
