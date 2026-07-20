@@ -2,24 +2,167 @@
 // Handles both full job pages (/jobs/view/...) and the search/feed preview panels.
 // Uses polling to wait for dynamically loaded content.
 
+function cleanJobField(value) {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function isLinkedInUiHeading(value) {
+  return /^(use ai|show match|tailor my resume|help me stand out|job search faster|about the job|similar jobs|people also viewed)/i.test(
+    cleanJobField(value)
+  );
+}
+
+function htmlToPlainText(value, ownerDocument = document) {
+  let html = String(value || "");
+  // LinkedIn's JSON-LD HTML is entity-encoded, sometimes more than once.
+  for (let i = 0; i < 2 && /&(?:lt|gt|amp|quot|#39);/i.test(html); i++) {
+    const textarea = ownerDocument.createElement("textarea");
+    textarea.innerHTML = html;
+    html = textarea.value;
+  }
+  const container = ownerDocument.createElement("div");
+  container.innerHTML = html;
+  return (container.textContent || "")
+    .replace(/\r/g, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function findJobPosting(value) {
+  if (!value || typeof value !== "object") return null;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findJobPosting(item);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (value["@type"] === "JobPosting") return value;
+  if (Array.isArray(value["@graph"])) return findJobPosting(value["@graph"]);
+  return null;
+}
+
+function extractStructuredJob(sourceDocument = document) {
+  for (const script of sourceDocument.querySelectorAll('script[type="application/ld+json"]')) {
+    try {
+      const posting = findJobPosting(JSON.parse(script.textContent || "null"));
+      if (!posting) continue;
+      const organization = posting.hiringOrganization;
+      const company = typeof organization === "string" ? organization : organization?.name;
+      const title = cleanJobField(posting.title);
+      const description = htmlToPlainText(posting.description, sourceDocument);
+      if (title && description.length > 100) {
+        return {
+          title,
+          company: cleanJobField(company),
+          description,
+          url: cleanLinkedInJobUrl(posting.url || ""),
+        };
+      }
+    } catch {
+      // Ignore unrelated or malformed structured-data blocks.
+    }
+  }
+  return null;
+}
+
+function cleanLinkedInJobUrl(value) {
+  const match = String(value || "").match(/https?:\/\/(?:[a-z]+\.)?linkedin\.com\/jobs\/view\/(?:[^/?#]*-)?(\d+)/i);
+  return match ? `https://www.linkedin.com/jobs/view/${match[1]}` : "";
+}
+
+function getSelectedSearchCard() {
+  return (
+    document.querySelector(".job-search-card--active") ||
+    document.querySelector('[class*="job-card-container--active"]') ||
+    document.querySelector('[class*="job-card"][aria-selected="true"]') ||
+    document.querySelector('[class*="jobs-search-results__list-item--active"]') ||
+    document.querySelector('li[class*="active"] .job-card-container') ||
+    document.querySelector('[data-entity-urn*="jobPosting"][aria-current="true"]')
+  );
+}
+
+function getFocusedJobPanel() {
+  return (
+    document.querySelector('.jobs-search__job-details') ||
+    document.querySelector('.jobs-search-two-pane__detail-view') ||
+    document.querySelector('[class*="jobs-search-two-pane__detail"]') ||
+    document.querySelector('[class*="job-details"]') ||
+    document.querySelector('.scaffold-layout__detail')
+  );
+}
+
+function getSelectedJobUrl() {
+  const params = new URLSearchParams(window.location.search);
+  const currentJobId = params.get("currentJobId");
+  if (currentJobId && /^\d+$/.test(currentJobId)) {
+    return `https://www.linkedin.com/jobs/view/${currentJobId}`;
+  }
+  const card = getSelectedSearchCard();
+  const cardLink = card?.querySelector('a[href*="/jobs/view/"]');
+  const cardUrl = cleanLinkedInJobUrl(cardLink?.href || "");
+  if (cardUrl) return cardUrl;
+  return cleanLinkedInJobUrl(window.location.href);
+}
+
+async function fetchSelectedJobDetails() {
+  const url = getSelectedJobUrl();
+  if (!url) return null;
+  try {
+    const response = await fetch(url, { credentials: "include" });
+    if (!response.ok) return null;
+    const html = await response.text();
+    const sourceDocument = new DOMParser().parseFromString(html, "text/html");
+    const structured = extractStructuredJob(sourceDocument);
+    if (structured) return { ...structured, url };
+
+    const title = cleanJobField(
+      sourceDocument.querySelector("h1.topcard__title, h1[class*='top-card-layout__title']")?.textContent
+    );
+    const company = cleanJobField(
+      sourceDocument.querySelector("a.topcard__org-name-link, a[class*='topcard__org-name-link']")?.textContent
+    );
+    const descriptionElement = sourceDocument.querySelector(
+      ".show-more-less-html__markup, .description__text--rich, section.description"
+    );
+    const description = cleanJobField(descriptionElement?.textContent);
+    return title && company && description.length > 100 ? { title, company, description, url } : null;
+  } catch {
+    return null;
+  }
+}
+
 function extractLinkedInJob() {
+
+  const pageStructured = /linkedin\.com\/jobs\/view\//.test(window.location.href)
+    ? extractStructuredJob(document)
+    : null;
+  if (pageStructured?.title && pageStructured?.company && pageStructured.description?.length > 100) {
+    return {
+      ...pageStructured,
+      url: cleanLinkedInJobUrl(window.location.href) || pageStructured.url || window.location.href.split("?")[0],
+    };
+  }
 
   // ── Try learned selectors first (saved from a previous AI fix) ───────────
   const learned = window.__resumeTrackerLearnedSelectors;
   if (learned) {
     const fromLearned = extractWithLearnedSelectors(learned);
-    const hasAll = fromLearned?.title && fromLearned?.company && fromLearned?.description;
+    const selectedCard = getSelectedSearchCard();
+    const selectedTitle = cleanJobField(
+      selectedCard?.querySelector('.base-search-card__title, h3, [class*="job-card-list__title"], [class*="job-title"]')?.textContent
+    );
+    const selectedCompany = cleanJobField(
+      selectedCard?.querySelector('.base-search-card__subtitle, h4, [class*="primary-description"], [class*="company"]')?.textContent
+    );
+    const learnedTitleMatches = !selectedTitle || cleanJobField(fromLearned?.title).toLowerCase() === selectedTitle.toLowerCase();
+    const learnedCompanyMatches = !selectedCompany || cleanJobField(fromLearned?.company).toLowerCase() === selectedCompany.toLowerCase();
+    const hasFocusedDetails = /\/jobs\/view\//.test(window.location.href) || Boolean(getFocusedJobPanel());
+    const hasAll = fromLearned?.title && !isLinkedInUiHeading(fromLearned.title) &&
+      learnedTitleMatches && learnedCompanyMatches && hasFocusedDetails &&
+      fromLearned?.company && fromLearned?.description;
     if (hasAll) {
-      // Still need URL — run that part of the generic extractor
-      const url = (() => {
-        let u = window.location.href;
-        const p = new URLSearchParams(window.location.search);
-        let id = p.get("currentJobId");
-        if (!id) { const m = u.match(/\/jobs\/view\/(\d+)/); if (m) id = m[1]; }
-        if (!id) { const el = document.querySelector('[data-job-id]'); if (el) id = el.getAttribute('data-job-id'); }
-        if (id) return `https://www.linkedin.com/jobs/view/${id}`;
-        return u.includes("/jobs/view/") ? u.split("?")[0] : u;
-      })();
+      const url = getSelectedJobUrl() || window.location.href.split("?")[0];
       return { ...fromLearned, url };
     }
     // Partial hit — merge what we got and let the generic path fill the rest
@@ -57,33 +200,30 @@ function extractLinkedInJob() {
 
   const href = window.location.href;
   const isJobDetailPage = /linkedin\.com\/jobs\/view\//.test(href);
+  const structuredJob = isJobDetailPage ? extractStructuredJob(document) : null;
   // ─────────────────────── active job card (search) ────────────────────────
   // On search pages the right panel shows the selected job. We try to scope
   // the extraction to that panel to avoid reading stale list-card data.
 
-  const rightPanel =
-    document.querySelector('.jobs-search__job-details') ||
-    document.querySelector('.jobs-search-two-pane__detail-view') ||
-    document.querySelector('[class*="jobs-search-two-pane__detail"]') ||
-    document.querySelector('[class*="job-details"]') ||
-    document.querySelector('.scaffold-layout__detail');
+  const rightPanel = getFocusedJobPanel();
 
   // The selected/active card in the list pane — useful for title fallback
-  const activeCard =
-    document.querySelector('[class*="job-card-container--active"]') ||
-    document.querySelector('[class*="job-card"][aria-selected="true"]') ||
-    document.querySelector('[class*="jobs-search-results__list-item--active"]') ||
-    document.querySelector('li[class*="active"] .job-card-container') ||
-    // fallback: first result if nothing is explicitly active
-    document.querySelector('[class*="job-card-list__entity-lockup"]');
+  const activeCard = getSelectedSearchCard();
 
   // ───────────────────────────── TITLE ─────────────────────────────────────
 
-  let title = "";
+  let title = structuredJob?.title || "";
 
   // 1. Right panel h1 / h2 (job detail page & search panel)
-  if (rightPanel) {
-    title = getText(['h1', 'h2', '[class*="job-title"]', '[class*="jobs-unified-top-card"] h1', '[class*="topcard"] h1'], rightPanel);
+  if (!title && rightPanel) {
+    title = getText([
+      '[class*="job-details-jobs-unified-top-card__job-title"] h1',
+      '[class*="job-details-jobs-unified-top-card__job-title-link"]',
+      '[class*="jobs-unified-top-card__job-title"]',
+      'a[href*="/jobs/view/"][class*="job-title"]',
+      'h1',
+      'h2[class*="job-title"]',
+    ], rightPanel);
   }
 
   // 2. Any h1 in the page (detail page)
@@ -98,6 +238,8 @@ function extractLinkedInJob() {
     title = getText(
       [
         'a[class*="job-card-container__link"]',
+        '.base-search-card__title',
+        'h3',
         '[class*="job-card-list__title"]',
         '[class*="job-card-container__link"]',
         'a[data-tracking-control-name*="job_card_title"]',
@@ -113,6 +255,8 @@ function extractLinkedInJob() {
     title = getText(['[aria-label*="job title" i]']);
   }
 
+  if (isLinkedInUiHeading(title)) title = "";
+
   // 5. Data attributes
   if (!title) {
     title = getAttr(['[data-job-title]'], 'data-job-title');
@@ -127,10 +271,10 @@ function extractLinkedInJob() {
 
   // ──────────────────────────── COMPANY ────────────────────────────────────
 
-  let company = "";
+  let company = structuredJob?.company || "";
 
   // 1. Company link in right panel
-  if (rightPanel) {
+  if (!company && rightPanel) {
     const links = rightPanel.querySelectorAll('a[href*="/company/"]');
     for (const link of links) {
       const t = link.innerText?.trim();
@@ -156,6 +300,8 @@ function extractLinkedInJob() {
     company = getText(
       [
         '[class*="job-card-container__primary-description"]',
+        '.base-search-card__subtitle',
+        'h4',
         '[class*="job-card-container__company"]',
         '[class*="job-card__company-name"]',
         'a[href*="/company/"]',
@@ -186,7 +332,14 @@ function extractLinkedInJob() {
 
   // ─────────────────────────── DESCRIPTION ─────────────────────────────────
 
-  let description = "";
+  let description = structuredJob?.description || "";
+
+  // LinkedIn's current signed-in and public layouts both expose this focused
+  // container. Prefer it before broad ARIA-labelled articles.
+  if (!description) {
+    const jd = document.querySelector('#job-details');
+    if (jd?.innerText?.trim()?.length > 100) description = jd.innerText.trim();
+  }
 
   // 1. Stable ARIA-labelled section — works on both page types
   const ariaDescSelectors = [
@@ -196,18 +349,14 @@ function extractLinkedInJob() {
     '[aria-label*="job description" i]',
     'article[aria-label*="job" i]',
   ];
-  for (const sel of ariaDescSelectors) {
-    const el = document.querySelector(sel);
-    if (el?.innerText?.trim()?.length > 100) { description = el.innerText.trim(); break; }
-  }
-
-  // 2. #job-details (LinkedIn frequently uses this id)
   if (!description) {
-    const jd = document.querySelector('#job-details');
-    if (jd?.innerText?.trim()?.length > 100) description = jd.innerText.trim();
+    for (const sel of ariaDescSelectors) {
+      const el = document.querySelector(sel);
+      if (el?.innerText?.trim()?.length > 100) { description = el.innerText.trim(); break; }
+    }
   }
 
-  // 3. Right-panel rich-text content blocks
+  // 2. Right-panel rich-text content blocks
   if (!description && rightPanel) {
     const candidates = [
       '[class*="jobs-description__content"]',
@@ -228,7 +377,7 @@ function extractLinkedInJob() {
     }
   }
 
-  // 4. Same candidates without panel scoping
+  // 3. Same candidates without panel scoping
   if (!description) {
     const candidates = [
       '[class*="jobs-description__content"]',
@@ -249,7 +398,7 @@ function extractLinkedInJob() {
     }
   }
 
-  // 5. Longest div inside right panel (last resort)
+  // 4. Longest div inside right panel (last resort)
   if (!description && rightPanel) {
     let longest = "";
     for (const div of rightPanel.querySelectorAll('div')) {
@@ -276,7 +425,7 @@ function extractLinkedInJob() {
 
   // ───────────────────────────── URL / JOB ID ──────────────────────────────
 
-  let url = window.location.href;
+  let url = structuredJob?.url || window.location.href;
   const params = new URLSearchParams(window.location.search);
 
   let jobId = params.get("currentJobId");
@@ -297,7 +446,7 @@ function extractLinkedInJob() {
 
   if (!jobId) {
     // Grab job ID from highlighted card's link
-    const link =
+    const link = activeCard?.querySelector('a[href*="/jobs/view/"]') ||
       document.querySelector('[class*="active"] a[href*="/jobs/view/"]') ||
       document.querySelector('[aria-selected="true"] a[href*="/jobs/view/"]') ||
       document.querySelector('a[href*="/jobs/view/"]');
@@ -308,7 +457,11 @@ function extractLinkedInJob() {
   if (jobId) {
     url = `https://www.linkedin.com/jobs/view/${jobId}`;
   } else if (url.includes("/jobs/view/")) {
-    url = url.split("?")[0];
+    url = cleanLinkedInJobUrl(url) || url.split("?")[0];
+  } else if (!isJobDetailPage) {
+    // Public search-card links include the job title before the numeric ID.
+    // Normalize that selected link instead of returning the search-page URL.
+    url = getSelectedJobUrl() || url;
   }
 
   // Merge any partial hits from learned selectors (fills gaps without overwriting)
@@ -331,6 +484,21 @@ async function extractLinkedInJobWithRetry(maxAttempts = 10, delayMs = 400) {
     const hasDescription = result.description?.length > 100;
 
     if (hasTitle && hasCompany && hasDescription) return result;
+
+    // Search-result pages sometimes render only cards, with no description
+    // panel. Read the selected job's public detail page instead of sending the
+    // entire results page to AI, which can confuse LinkedIn UI with the title.
+    if (!/\/jobs\/view\//.test(window.location.href) && i === 0) {
+      const fetched = await fetchSelectedJobDetails();
+      if (fetched) {
+        return {
+          title: fetched.title || result.title,
+          company: fetched.company || result.company,
+          description: fetched.description || result.description,
+          url: fetched.url || result.url,
+        };
+      }
+    }
 
     if (i === maxAttempts - 1) return result;
 
@@ -494,25 +662,28 @@ function extractWithLearnedSelectors(learned) {
 // Grabs the cleanest visible text available — preferring the job detail panel
 // so the AI receives focused, relevant content rather than the whole page.
 function getJobPageText() {
-  // Priority order: right-side detail panel → full main area → full body
-  const panel =
-    document.querySelector('.jobs-search__job-details') ||
-    document.querySelector('.jobs-search-two-pane__detail-view') ||
-    document.querySelector('[class*="jobs-search-two-pane__detail"]') ||
-    document.querySelector('[class*="job-details"]') ||
-    document.querySelector('.scaffold-layout__detail') ||
+  // On a card-only search page, keep the AI fallback scoped to the selected
+  // card. Sending every search result is what caused UI headings and unrelated
+  // jobs to be mistaken for the designation.
+  const focusedPanel = getFocusedJobPanel();
+  const selectedCard = getSelectedSearchCard();
+  const isSearchPage = /linkedin\.com\/jobs\/search\//.test(window.location.href);
+  const panel = focusedPanel ||
+    (isSearchPage && selectedCard ? selectedCard : null) ||
     document.querySelector('main') ||
     document.body;
 
   // innerText respects CSS visibility (display:none elements are excluded)
   const raw = panel?.innerText ?? document.body.innerText;
+  const selectedUrl = isSearchPage ? getSelectedJobUrl() : "";
 
   // Collapse excessive blank lines so the AI token budget is used well
-  return raw
+  const cleaned = raw
     .replace(/\r\n/g, "\n")
     .replace(/\n{4,}/g, "\n\n\n")
     .trim()
     .slice(0, 12000); // ~3k tokens max — enough for any job posting
+  return selectedUrl ? `${cleaned}\n\nJob URL: ${selectedUrl}` : cleaned;
 }
 
 window.__resumeTrackerExtract        = extractLinkedInJob;

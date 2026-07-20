@@ -97,7 +97,9 @@ async function autoAiFill(tabId, port) {
 // ── Selector persistence helpers ──────────────────────────────────────────
 
 function selectorStorageKey(pageType) {
-  return `learnedSelectors_${pageType}`;
+  // Version the cache whenever extraction rules change so a selector learned
+  // from an older LinkedIn layout cannot keep returning a wrong designation.
+  return `learnedSelectors_v2_${pageType}`;
 }
 
 async function learnAndSaveSelectors(tabId, aiData) {

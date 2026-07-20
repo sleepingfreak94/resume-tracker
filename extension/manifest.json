@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Resume Tracker – LinkedIn Import & Auto-Fill",
-  "version": "2.1",
+  "version": "2.2",
   "description": "Import LinkedIn jobs, auto-apply to ATS forms with tailored resume and cover letter.",
   "permissions": ["activeTab", "scripting", "storage", "downloads", "tabs"],
   "host_permissions": [
