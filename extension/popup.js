@@ -47,17 +47,6 @@ function openAiFallback() {
   $("ai-chevron").classList.add("open");
 }
 
-// ── Import tab helpers ────────────────────────────────────────────────────
-
-function applyJobFields(data, { onlyMissing = false } = {}) {
-  if (data.title   && (!onlyMissing || !$("title").value.trim()))
-    $("title").value = data.title;
-  if (data.company && (!onlyMissing || !$("company").value.trim()))
-    $("company").value = data.company;
-  if (data.description && (!onlyMissing || !$("description").value.trim()))
-    $("description").value = data.description;
-}
-
 function missingFields() {
   const out = [];
   if (!$("company").value.trim())     out.push("company");
@@ -66,40 +55,12 @@ function missingFields() {
   return out;
 }
 
-// ── Stage 2: silently send page text to AI ───────────────────────────────
-
-async function autoAiFill(tabId, port) {
-  showStatus("Auto-detection incomplete — asking AI to read the page…", "info");
-
-  const [{ result: pageText }] = await chrome.scripting.executeScript({
-    target: { tabId },
-    func: () => window.__resumeTrackerGetPageText?.() ?? document.body.innerText.slice(0, 12000),
-  });
-
-  if (!pageText || pageText.trim().length < 50) {
-    throw new Error("Could not read page content.");
-  }
-
-  const res = await fetch(`http://localhost:${port}/api/parse-job`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text: pageText }),
-  });
-
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.error || `Server error ${res.status}`);
-  }
-
-  return await res.json();
-}
-
 // ── Selector persistence helpers ──────────────────────────────────────────
 
 function selectorStorageKey(pageType) {
   // Version the cache whenever extraction rules change so a selector learned
   // from an older LinkedIn layout cannot keep returning a wrong designation.
-  return `learnedSelectors_v2_${pageType}`;
+  return `learnedSelectors_v3_${pageType}`;
 }
 
 async function learnAndSaveSelectors(tabId, aiData) {
@@ -124,8 +85,7 @@ async function injectLearnedSelectors(tabId, url) {
     const pageType = /\/jobs\/view\//.test(url) ? "detail" : "search";
     const key = selectorStorageKey(pageType);
     const stored = await chrome.storage.local.get(key);
-    const learned = stored[key];
-    if (!learned) return;
+    const learned = stored[key] || null;
 
     await chrome.scripting.executeScript({
       target: { tabId },
@@ -446,47 +406,18 @@ async function init() {
     console.warn("DOM scrape failed:", err.message);
   }
 
-  // ── Stage 2: if anything is missing, silently ask AI ────────────────────
+  // ── Stage 2: keep AI as an explicit manual fallback ─────────────────────
   const missing1 = missingFields();
   if (missing1.length === 0) {
     hideStatus();
     return;
   }
 
-  try {
-    const aiData = await autoAiFill(tab.id, getPort());
-    applyJobFields(aiData, { onlyMissing: true });
-
-    if (aiData.title || aiData.company || aiData.description) {
-      learnAndSaveSelectors(tab.id, {
-        title:       $("title").value.trim(),
-        company:     $("company").value.trim(),
-        description: $("description").value.trim(),
-      });
-    }
-
-    const missing2 = missingFields();
-    if (missing2.length === 0) {
-      hideStatus();
-      showStatus("Job details extracted via AI. Selectors updated for next time.", "success");
-      return;
-    }
-
-    showStatus(
-      `AI filled in what it could. Still missing: ${missing2.join(", ")}. Paste the job text below.`,
-      "warning"
-    );
-    openAiFallback();
-  } catch (aiErr) {
-    const isFetchErr = aiErr.message.includes("Failed to fetch");
-    showStatus(
-      isFetchErr
-        ? `App not running on port ${getPort()}. Paste job text below for AI extraction once the app is started.`
-        : `Auto-read failed (${aiErr.message}). Paste the job text below.`,
-      "warning"
-    );
-    openAiFallback();
-  }
+  showStatus(
+    `Automatic detection is missing: ${missing1.join(", ")}. Reopen the extension after the job panel finishes loading, or use the manual AI fallback below.`,
+    "warning"
+  );
+  openAiFallback();
 }
 
 // AI Parse button

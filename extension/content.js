@@ -87,9 +87,14 @@ function getFocusedJobPanel() {
     document.querySelector('.jobs-search__job-details') ||
     document.querySelector('.jobs-search-two-pane__detail-view') ||
     document.querySelector('[class*="jobs-search-two-pane__detail"]') ||
-    document.querySelector('[class*="job-details"]') ||
-    document.querySelector('.scaffold-layout__detail')
+    document.querySelector('.scaffold-layout__detail') ||
+    document.querySelector('[data-job-details]') ||
+    document.querySelector('[aria-label*="job details" i]')
   );
+}
+
+function isLinkedInSearchPage() {
+  return /linkedin\.com\/jobs\/(?:search|search-results)\//.test(window.location.href);
 }
 
 function getSelectedJobUrl() {
@@ -166,7 +171,9 @@ function extractLinkedInJob() {
       return { ...fromLearned, url };
     }
     // Partial hit — merge what we got and let the generic path fill the rest
-    window.__resumeTrackerPartialFromLearned = fromLearned || {};
+    window.__resumeTrackerPartialFromLearned = learnedTitleMatches && learnedCompanyMatches
+      ? (fromLearned || {})
+      : {};
   } else {
     window.__resumeTrackerPartialFromLearned = null;
   }
@@ -224,6 +231,19 @@ function extractLinkedInJob() {
       'h1',
       'h2[class*="job-title"]',
     ], rightPanel);
+  }
+
+  // Current signed-in search-results layout. Keep these selectors specific to
+  // the job-detail top card so headings from the result list cannot win.
+  if (!title) {
+    title = getText([
+      '.job-details-jobs-unified-top-card__job-title h1',
+      '.job-details-jobs-unified-top-card__job-title-link',
+      '[class*="job-details-jobs-unified-top-card__job-title"] h1',
+      '[class*="job-details-jobs-unified-top-card__job-title-link"]',
+      '[class*="jobs-unified-top-card__job-title"] h1',
+      'h1 a[href*="/jobs/view/"]',
+    ]);
   }
 
   // 2. Any h1 in the page (detail page)
@@ -361,6 +381,7 @@ function extractLinkedInJob() {
     const candidates = [
       '[class*="jobs-description__content"]',
       '[class*="jobs-description-content"]',
+      '[class*="jobs-description-content__text"]',
       '[class*="description__text"]',
       '[class*="jobs-box__html-content"]',
       '.show-more-less-html__markup',
@@ -382,6 +403,7 @@ function extractLinkedInJob() {
     const candidates = [
       '[class*="jobs-description__content"]',
       '[class*="jobs-description-content"]',
+      '[class*="jobs-description-content__text"]',
       '[class*="description__text"]',
       '[class*="jobs-box__html-content"]',
       '.show-more-less-html__markup',
@@ -488,7 +510,7 @@ async function extractLinkedInJobWithRetry(maxAttempts = 10, delayMs = 400) {
     // Search-result pages sometimes render only cards, with no description
     // panel. Read the selected job's public detail page instead of sending the
     // entire results page to AI, which can confuse LinkedIn UI with the title.
-    if (!/\/jobs\/view\//.test(window.location.href) && i === 0) {
+    if (!/\/jobs\/view\//.test(window.location.href) && !getFocusedJobPanel() && i === 0) {
       const fetched = await fetchSelectedJobDetails();
       if (fetched) {
         return {
@@ -667,7 +689,7 @@ function getJobPageText() {
   // jobs to be mistaken for the designation.
   const focusedPanel = getFocusedJobPanel();
   const selectedCard = getSelectedSearchCard();
-  const isSearchPage = /linkedin\.com\/jobs\/search\//.test(window.location.href);
+  const isSearchPage = isLinkedInSearchPage();
   const panel = focusedPanel ||
     (isSearchPage && selectedCard ? selectedCard : null) ||
     document.querySelector('main') ||
