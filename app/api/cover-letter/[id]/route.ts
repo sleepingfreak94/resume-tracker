@@ -1,10 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getJob, logActivity } from "@/lib/db";
 import { generateCoverLetter } from "@/lib/agent";
+import { parsePositiveId } from "@/lib/validation";
 
 export async function POST(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const jobId = Number(id);
+  const jobId = parsePositiveId(id);
+  if (!jobId) return NextResponse.json({ error: "Invalid job id" }, { status: 400 });
 
   try {
     const job = getJob(jobId);

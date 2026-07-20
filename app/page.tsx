@@ -90,7 +90,7 @@ export default function DashboardPage() {
   const pipeline = jobs.filter((j) => PIPELINE_STATUSES.includes(j.status)).length;
   const offers = jobs.filter((j) => j.status === "offer").length;
   const closed = jobs.filter((j) => CLOSED_STATUSES.includes(j.status)).length;
-  const applied = jobs.filter((j) => !["pending", "generating", "ready"].includes(j.status) && !CLOSED_STATUSES.includes(j.status)).length;
+  const applied = jobs.filter((j) => !["pending", "generating", "ready", "withdrawn"].includes(j.status)).length;
   const responded = jobs.filter((j) => ["recruiter_call", "interview", "offer"].includes(j.status)).length;
   const interviews = jobs.filter((j) => ["interview", "offer"].includes(j.status)).length;
   const responseRate = applied > 0 ? Math.round((responded / applied) * 100) : null;

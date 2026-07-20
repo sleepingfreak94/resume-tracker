@@ -12,29 +12,27 @@ import {
   JobStatus,
   STATUS_CONFIG,
   USER_SELECTABLE_STATUSES,
-  JOB_STATUSES,
 } from "@/lib/job-status";
 
 const MarkdownPreview = dynamic(() => import("@/components/MarkdownPreview"), { ssr: false });
 
 function JobTitle({ title, jobLink }: { title: string; jobLink: string | null }) {
-  if (jobLink) {
-    return (
-      <a
-        href={jobLink}
-        target="_blank"
-        rel="noopener noreferrer"
-        className="text-gray-500 text-xs mt-0.5 hover:text-indigo-400 hover:underline inline-flex items-center gap-1"
-        title="Open job listing"
-      >
-        {title}
-        <svg className="w-3 h-3 flex-shrink-0 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-        </svg>
-      </a>
-    );
-  }
-  return <div className="text-gray-500 text-xs mt-0.5">{title}</div>;
+  const needsReview = title.length > 100 || /show more|applicants|reposted|promoted|\d+\s+(minute|hour|day)s? ago/i.test(title);
+  const content = jobLink ? (
+    <a
+      href={jobLink}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="text-gray-400 text-xs mt-0.5 hover:text-indigo-400 hover:underline inline-flex items-start gap-1 break-words"
+      title="Open job listing"
+    >
+      {title}
+      <svg className="w-3 h-3 flex-shrink-0 opacity-60 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+      </svg>
+    </a>
+  ) : <div className="text-gray-400 text-xs mt-0.5 break-words">{title}</div>;
+  return <div>{content}{needsReview && <span className="mt-1 inline-flex rounded bg-amber-950 px-1.5 py-0.5 text-[10px] font-medium text-amber-300">Review imported title</span>}</div>;
 }
 
 type Status = JobStatus;
@@ -59,7 +57,7 @@ interface ATSScoreMap {
 
 const STATUS_FILTERS: { label: string; value: Status | "all" }[] = [
   { label: "All", value: "all" },
-  ...JOB_STATUSES.map((value) => ({ label: STATUS_CONFIG[value].label, value })),
+  ...USER_SELECTABLE_STATUSES.map((value) => ({ label: STATUS_CONFIG[value].label, value })),
 ];
 
 function formatDate(iso: string) {
@@ -82,6 +80,10 @@ export default function JobsPage() {
   const [deleteConfirm, setDeleteConfirm] = useState<number | null>(null);
   const [chatCount, setChatCount] = useState(0);
   const [atsScores, setAtsScores] = useState<ATSScoreMap>({});
+  const [search, setSearch] = useState("");
+  const [sort, setSort] = useState<"newest" | "oldest" | "company">("newest");
+  const [page, setPage] = useState(1);
+  const [notice, setNotice] = useState<string | null>(null);
 
   const fetchJobs = useCallback(async () => {
     const res = await fetch("/api/jobs");
@@ -142,12 +144,13 @@ export default function JobsPage() {
       const res = await fetch(`/api/tailor/${job.id}`, { method: "POST" });
       const data = await res.json();
       if (!res.ok || !data.success) {
-        alert(`Generation failed: ${data.error || "Unknown error"}`);
+        setNotice(`Generation failed: ${data.error || "Unknown error"}`);
         setJobs((prev) => prev.map((j) => j.id === job.id ? { ...j, status: "pending" } : j));
       } else {
         await fetchJobs();
       }
     } catch {
+      setNotice("Generation failed because the server could not be reached.");
       setJobs((prev) => prev.map((j) => j.id === job.id ? { ...j, status: "pending" } : j));
     } finally {
       setGenerating((g) => { const s = new Set(g); s.delete(job.id); return s; });
@@ -198,7 +201,17 @@ export default function JobsPage() {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  const filtered = filter === "all" ? jobs : jobs.filter((j) => j.status === filter);
+  const filtered = jobs
+    .filter((job) => filter === "all" || job.status === filter)
+    .filter((job) => `${job.company} ${job.title}`.toLowerCase().includes(search.trim().toLowerCase()))
+    .sort((a, b) => sort === "company"
+      ? a.company.localeCompare(b.company)
+      : sort === "oldest"
+        ? a.created_at.localeCompare(b.created_at)
+        : b.created_at.localeCompare(a.created_at));
+  const pageSize = 15;
+  const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
+  const pagedJobs = filtered.slice((Math.min(page, pageCount) - 1) * pageSize, Math.min(page, pageCount) * pageSize);
 
   if (loading) {
     return (
@@ -211,7 +224,7 @@ export default function JobsPage() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-white">Jobs</h1>
           <p className="text-gray-400 mt-1 text-sm">{jobs.length} applications tracked</p>
@@ -227,12 +240,19 @@ export default function JobsPage() {
         </Link>
       </div>
 
+      {notice && (
+        <div role="alert" className="flex items-start justify-between gap-3 rounded-xl border border-red-900 bg-red-950/50 px-4 py-3 text-sm text-red-200">
+          <span>{notice}</span>
+          <button type="button" onClick={() => setNotice(null)} aria-label="Dismiss message" className="text-red-300 hover:text-white">×</button>
+        </div>
+      )}
+
       {/* Filter tabs */}
       <div className="flex items-center gap-1 bg-gray-900 border border-gray-800 rounded-xl p-1 w-fit max-w-full overflow-x-auto">
         {STATUS_FILTERS.map((f) => (
           <button
             key={f.value}
-            onClick={() => setFilter(f.value)}
+            onClick={() => { setFilter(f.value); setPage(1); }}
             className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
               filter === f.value ? "bg-indigo-600 text-white" : "text-gray-400 hover:text-gray-200"
             }`}
@@ -247,8 +267,19 @@ export default function JobsPage() {
         ))}
       </div>
 
+      <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_180px]">
+        <label className="sr-only" htmlFor="job-search">Search jobs</label>
+        <input id="job-search" type="search" value={search} onChange={(event) => { setSearch(event.target.value); setPage(1); }} placeholder="Search company or role…" className="w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-white placeholder:text-gray-500" />
+        <label className="sr-only" htmlFor="job-sort">Sort jobs</label>
+        <select id="job-sort" value={sort} onChange={(event) => { setSort(event.target.value as typeof sort); setPage(1); }} className="rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-gray-200">
+          <option value="newest">Newest first</option>
+          <option value="oldest">Oldest first</option>
+          <option value="company">Company A–Z</option>
+        </select>
+      </div>
+
       {/* Table + preview */}
-      <div className={`flex gap-6 ${previewJob ? "items-start" : ""}`}>
+      <div className={`flex gap-6 min-w-0 ${previewJob ? "items-start" : ""}`}>
         <div className={`${previewJob ? "flex-1 min-w-0" : "w-full"}`}>
           {filtered.length === 0 ? (
             <div className="text-center py-16 bg-gray-900/50 border border-gray-800 rounded-xl">
@@ -265,7 +296,8 @@ export default function JobsPage() {
               )}
             </div>
           ) : (
-            <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+            <>
+            <div className="hidden lg:block bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-gray-800">
@@ -277,7 +309,7 @@ export default function JobsPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-800/60">
-                  {filtered.map((job) => (
+                  {pagedJobs.map((job) => (
                     <tr
                       key={job.id}
                       className={`group hover:bg-gray-800/30 transition-colors cursor-pointer ${previewJob?.id === job.id ? "bg-gray-800/40" : ""}`}
@@ -324,7 +356,7 @@ export default function JobsPage() {
                           <Link
                             href={`/jobs/${job.id}`}
                             onClick={(e) => e.stopPropagation()}
-                            className="flex items-center gap-1 px-2.5 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg text-xs font-medium transition-colors opacity-0 group-hover:opacity-100"
+                            className="flex items-center gap-1 px-2.5 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg text-xs font-medium transition-colors"
                           >
                             Details
                             <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -332,6 +364,7 @@ export default function JobsPage() {
                             </svg>
                           </Link>
                           <select
+                            aria-label={`Status for ${job.title} at ${job.company}`}
                             value={job.status}
                             onChange={(e) => { e.stopPropagation(); handleStatusChange(job, e.target.value as Status); }}
                             disabled={job.status === "generating"}
@@ -349,6 +382,8 @@ export default function JobsPage() {
                             </div>
                           ) : (
                             <button
+                              aria-label={`Delete ${job.title} at ${job.company}`}
+                              title="Delete job"
                               onClick={(e) => { e.stopPropagation(); setDeleteConfirm(job.id); }}
                               className="p-1.5 text-gray-600 hover:text-red-400 rounded-lg hover:bg-gray-800 transition-colors opacity-0 group-hover:opacity-100"
                             >
@@ -364,12 +399,56 @@ export default function JobsPage() {
                 </tbody>
               </table>
             </div>
+            <div className="grid gap-3 lg:hidden">
+              {pagedJobs.map((job) => (
+                <article key={job.id} className="rounded-xl border border-gray-800 bg-gray-900 p-4 space-y-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <h2 className="font-medium text-gray-100 break-words">{job.company}</h2>
+                      <JobTitle title={job.title} jobLink={job.job_link} />
+                    </div>
+                    <ATSScoreBadge score={atsScores[job.id]} />
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <StatusBadge status={job.status} />
+                    <span className="text-xs text-gray-400">{formatDate(job.created_at)}</span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2 border-t border-gray-800 pt-3">
+                    <Link href={`/jobs/${job.id}`} className="rounded-lg bg-gray-800 px-3 py-2 text-xs font-medium text-gray-200 hover:bg-gray-700">Details</Link>
+                    {(job.status === "pending" || job.status === "ready") && (
+                      <button type="button" onClick={() => handleGenerate(job)} disabled={generating.has(job.id)} className="rounded-lg bg-indigo-600 px-3 py-2 text-xs font-medium text-white disabled:opacity-50">
+                        {job.status === "ready" ? "Regenerate" : "Generate"}
+                      </button>
+                    )}
+                    <label className="sr-only" htmlFor={`mobile-status-${job.id}`}>Status for {job.title}</label>
+                    <select id={`mobile-status-${job.id}`} value={job.status} onChange={(event) => handleStatusChange(job, event.target.value as Status)} disabled={job.status === "generating"} className="min-w-0 flex-1 rounded-lg border border-gray-700 bg-gray-800 px-2 py-2 text-xs text-gray-200">
+                      {USER_SELECTABLE_STATUSES.map((status) => <option key={status} value={status}>{STATUS_CONFIG[status].label}</option>)}
+                    </select>
+                    {deleteConfirm === job.id ? (
+                      <><button type="button" onClick={() => handleDelete(job.id)} className="px-2 py-2 text-xs font-medium text-red-300">Confirm delete</button><button type="button" onClick={() => setDeleteConfirm(null)} className="px-2 py-2 text-xs text-gray-300">Cancel</button></>
+                    ) : (
+                      <button type="button" onClick={() => setDeleteConfirm(job.id)} aria-label={`Delete ${job.title} at ${job.company}`} className="rounded-lg px-3 py-2 text-xs text-red-300 hover:bg-red-950">Delete</button>
+                    )}
+                  </div>
+                </article>
+              ))}
+            </div>
+            </>
+          )}
+          {filtered.length > pageSize && (
+            <div className="mt-4 flex items-center justify-between text-sm text-gray-400">
+              <span>Page {Math.min(page, pageCount)} of {pageCount}</span>
+              <div className="flex gap-2">
+                <button type="button" onClick={() => setPage((value) => Math.max(1, value - 1))} disabled={page <= 1} className="rounded-lg border border-gray-700 px-3 py-1.5 disabled:opacity-40">Previous</button>
+                <button type="button" onClick={() => setPage((value) => Math.min(pageCount, value + 1))} disabled={page >= pageCount} className="rounded-lg border border-gray-700 px-3 py-1.5 disabled:opacity-40">Next</button>
+              </div>
+            </div>
           )}
         </div>
 
         {/* Preview panel */}
         {previewJob && (
-          <div className="w-[480px] flex-shrink-0 bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+          <div className="hidden xl:block w-[480px] flex-shrink-0 bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
             <div className="flex items-center justify-between px-4 py-3 border-b border-gray-800">
               <div className="min-w-0 flex items-center gap-2">
                 <div className="min-w-0">
@@ -412,7 +491,7 @@ export default function JobsPage() {
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
                   </svg>
                 </a>
-                <button onClick={() => setPreviewJob(null)} className="p-1 text-gray-500 hover:text-gray-300 rounded transition-colors">
+                <button aria-label="Close preview" onClick={() => setPreviewJob(null)} className="p-1 text-gray-500 hover:text-gray-300 rounded transition-colors">
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
                   </svg>

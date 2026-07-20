@@ -49,13 +49,13 @@ export function isInvalidGrantError(err: unknown): boolean {
   return /invalid_grant/i.test(msg);
 }
 
-export function getAuthUrl(returnTo: string): string {
+export function getAuthUrl(state: string): string {
   const oauth2 = getOAuth2Client();
   return oauth2.generateAuthUrl({
     access_type: "offline",
     prompt: "consent",
     scope: SCOPES,
-    state: Buffer.from(returnTo).toString("base64url"),
+    state,
   });
 }
 
@@ -64,15 +64,6 @@ export async function exchangeCodeForTokens(code: string) {
   const { tokens } = await oauth2.getToken(code);
   saveTokens(tokens as Credentials);
   return tokens;
-}
-
-export function decodeReturnTo(state: string | null): string {
-  if (!state) return "/";
-  try {
-    return Buffer.from(state, "base64url").toString("utf-8") || "/";
-  } catch {
-    return "/";
-  }
 }
 
 async function getAuthedClient() {

@@ -17,6 +17,7 @@ export default function RulesPage() {
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editText, setEditText] = useState("");
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const [deleteConfirm, setDeleteConfirm] = useState<number | null>(null);
 
   const fetchRules = async () => {
     const res = await fetch("/api/rules");
@@ -77,8 +78,8 @@ export default function RulesPage() {
   };
 
   const handleDelete = async (id: number) => {
-    if (!confirm("Delete this rule?")) return;
     await fetch(`/api/rules/${id}`, { method: "DELETE" });
+    setDeleteConfirm(null);
     await fetchRules();
   };
 
@@ -115,6 +116,7 @@ export default function RulesPage() {
 
       {message && (
         <div
+          role={message.type === "error" ? "alert" : "status"}
           className={`px-4 py-3 rounded-lg text-sm ${
             message.type === "success"
               ? "bg-green-900/50 border border-green-800 text-green-300"
@@ -127,9 +129,10 @@ export default function RulesPage() {
 
       {/* Add new rule */}
       <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
-        <label className="block text-sm font-medium text-gray-300 mb-2">Add New Rule</label>
+        <label htmlFor="new-rule" className="block text-sm font-medium text-gray-300 mb-2">Add New Rule</label>
         <div className="flex gap-3">
           <input
+            id="new-rule"
             value={newRule}
             onChange={(e) => setNewRule(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && handleAdd()}
@@ -190,9 +193,10 @@ export default function RulesPage() {
             </div>
 
             {/* Actions */}
-            <div className="flex items-center gap-1 flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
+            <div className="flex items-center gap-1 flex-shrink-0 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100 transition-opacity">
               <button
                 onClick={() => { setEditingId(rule.id); setEditText(rule.rule_text); }}
+                aria-label={`Edit rule ${idx + 1}`}
                 className="p-1.5 text-gray-500 hover:text-gray-300 rounded-lg hover:bg-gray-800 transition-colors"
                 title="Edit"
               >
@@ -200,20 +204,24 @@ export default function RulesPage() {
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
                 </svg>
               </button>
-              <button
-                onClick={() => handleDelete(rule.id)}
+              {deleteConfirm === rule.id ? <><button type="button" onClick={() => handleDelete(rule.id)} className="px-2 py-1 text-xs text-red-300">Confirm</button><button type="button" onClick={() => setDeleteConfirm(null)} className="px-2 py-1 text-xs text-gray-300">Cancel</button></> : <button
+                onClick={() => setDeleteConfirm(rule.id)}
                 className="p-1.5 text-gray-500 hover:text-red-400 rounded-lg hover:bg-gray-800 transition-colors"
                 title="Delete"
+                aria-label={`Delete rule ${idx + 1}`}
               >
                 <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
                 </svg>
-              </button>
+              </button>}
             </div>
 
             {/* Toggle */}
             <button
               onClick={() => handleToggle(rule)}
+              role="switch"
+              aria-checked={Boolean(rule.is_active)}
+              aria-label={`${rule.is_active ? "Disable" : "Enable"} rule ${idx + 1}`}
               className={`flex-shrink-0 w-10 h-5 rounded-full transition-colors relative ${
                 rule.is_active ? "bg-indigo-600" : "bg-gray-700"
               }`}

@@ -1,17 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import path from "path";
-import fs from "fs";
-import { parsePortalUrl, type Portal } from "@/lib/scanner";
-
-const PORTALS_PATH = path.join(process.cwd(), "portals.json");
-
-function read(): Portal[] {
-  return JSON.parse(fs.readFileSync(PORTALS_PATH, "utf-8")) as Portal[];
-}
+import { parsePortalUrl } from "@/lib/scanner";
+import { createPortal, deletePortal, listPortals, type Portal } from "@/lib/db";
 
 export async function GET() {
   try {
-    return NextResponse.json(read());
+    return NextResponse.json(listPortals());
   } catch (err) {
     return NextResponse.json({ error: String(err) }, { status: 500 });
   }
@@ -33,20 +26,15 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const portals = read();
-
-    // Avoid exact duplicates
-    if (portals.some((p) => p.ats === detected.ats && p.slug === detected.slug)) {
-      return NextResponse.json({ error: "This company is already in your portal list" }, { status: 409 });
-    }
-
-    const entry: Portal = { name: name.trim(), ...detected };
-    portals.push(entry);
-    fs.writeFileSync(PORTALS_PATH, JSON.stringify(portals, null, 2));
+    const entry = createPortal({ name: name.trim().slice(0, 120), ...detected });
 
     return NextResponse.json(entry, { status: 201 });
   } catch (err) {
-    return NextResponse.json({ error: String(err) }, { status: 500 });
+    const message = String(err);
+    return NextResponse.json(
+      { error: /UNIQUE/.test(message) ? "This company is already in your portal list" : "Unable to add portal" },
+      { status: /UNIQUE/.test(message) ? 409 : 500 }
+    );
   }
 }
 
@@ -56,9 +44,11 @@ export async function DELETE(req: NextRequest) {
     if (!ats || !slug) {
       return NextResponse.json({ error: "ats and slug are required" }, { status: 400 });
     }
-    const portals = read().filter((p) => !(p.ats === ats && p.slug === slug));
-    fs.writeFileSync(PORTALS_PATH, JSON.stringify(portals, null, 2));
-    return NextResponse.json({ ok: true });
+    if (!["greenhouse", "ashby", "lever"].includes(ats)) {
+      return NextResponse.json({ error: "Invalid ATS" }, { status: 400 });
+    }
+    const deleted = deletePortal(ats as Portal["ats"], slug);
+    return NextResponse.json({ ok: deleted });
   } catch (err) {
     return NextResponse.json({ error: String(err) }, { status: 500 });
   }

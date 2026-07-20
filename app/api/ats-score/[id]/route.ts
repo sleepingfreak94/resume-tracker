@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+import { after, NextRequest, NextResponse } from "next/server";
 import fs from "fs";
 import path from "path";
 import { Agent } from "@cursor/sdk";
@@ -6,11 +6,14 @@ import { getJob, getATSScore, upsertATSScore } from "@/lib/db";
 import { computeATSScore } from "@/lib/ats-scorer";
 import { buildATSAnalysisPrompt, type AIATSAnalysis } from "@/lib/ats-prompts";
 import { logActivity } from "@/lib/db";
+import { jobArtifactPath, parsePositiveId } from "@/lib/validation";
 
 export async function GET(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
-    const score = getATSScore(Number(id));
+    const jobId = parsePositiveId(id);
+    if (!jobId) return NextResponse.json({ error: "Invalid job id" }, { status: 400 });
+    const score = getATSScore(jobId);
     if (!score) return NextResponse.json({ exists: false });
     return NextResponse.json({ exists: true, ...score });
   } catch (err) {
@@ -21,14 +24,15 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
-    const jobId = Number(id);
+    const jobId = parsePositiveId(id);
+    if (!jobId) return NextResponse.json({ error: "Invalid job id" }, { status: 400 });
     const aiOnly = req.nextUrl.searchParams.get("ai_only") === "true";
 
     const job = getJob(jobId);
     if (!job) return NextResponse.json({ error: "Job not found" }, { status: 404 });
 
     // Read tailored resume (fall back to base if not tailored yet)
-    const tailoredPath = path.join(process.cwd(), "resumes", "tailored", `job-${jobId}.md`);
+    const tailoredPath = jobArtifactPath(jobId, "resume");
     const basePath = path.join(process.cwd(), "resumes", "base-resume.md");
     const resumePath = fs.existsSync(tailoredPath) ? tailoredPath : basePath;
 
@@ -64,8 +68,8 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     // Fire off AI analysis asynchronously — don't block the response
     const apiKey = process.env.CURSOR_API_KEY;
     if (apiKey) {
-      runAIAnalysis(jobId, resume, job.description, job.company, job.title, apiKey).catch(() => {
-        // AI analysis is best-effort
+      after(async () => {
+        await runAIAnalysis(jobId, resume, job.description, job.company, job.title, apiKey).catch(() => undefined);
       });
     }
 
@@ -88,16 +92,22 @@ async function runAIAnalysis(
     const result = await Agent.prompt(prompt, {
       apiKey,
       model: { id: "composer-2.5" },
-      local: { cwd: process.cwd() },
     });
 
     if (result.status !== "finished") return;
 
-    const text = result.result ?? "";
+    const text = (result.result ?? "").slice(0, 100_000);
     const jsonMatch = text.match(/\{[\s\S]*\}/);
     if (!jsonMatch) return;
 
-    const analysis: AIATSAnalysis = JSON.parse(jsonMatch[0]);
+    const analysis = JSON.parse(jsonMatch[0]) as AIATSAnalysis;
+    if (
+      typeof analysis.summary !== "string" ||
+      !Array.isArray(analysis.strengths) ||
+      !Array.isArray(analysis.gaps) ||
+      !Array.isArray(analysis.suggestions) ||
+      !analysis.detailedScores
+    ) return;
     upsertATSScore(jobId, {
       ai_analysis: JSON.stringify(analysis),
       ai_analyzed_at: new Date().toISOString(),

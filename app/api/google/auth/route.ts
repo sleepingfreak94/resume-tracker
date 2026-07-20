@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAuthUrl, isGoogleConfigured } from "@/lib/google-drive";
+import { setSetting } from "@/lib/db";
+import { sanitizeReturnTo } from "@/lib/validation";
 
 export async function GET(req: NextRequest) {
   if (!isGoogleConfigured()) {
@@ -9,7 +11,9 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  const returnTo = req.nextUrl.searchParams.get("returnTo") ?? "/";
-  const url = getAuthUrl(returnTo);
+  const returnTo = sanitizeReturnTo(req.nextUrl.searchParams.get("returnTo"));
+  const state = crypto.randomUUID();
+  setSetting(`oauth_state:${state}`, JSON.stringify({ returnTo, createdAt: Date.now() }));
+  const url = getAuthUrl(state);
   return NextResponse.redirect(url);
 }

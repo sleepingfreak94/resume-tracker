@@ -1,8 +1,14 @@
 import { Agent, CursorAgentError } from "@cursor/sdk";
-import path from "path";
 import fs from "fs";
 import { buildTailoringPrompt, buildCoverLetterPrompt, TailoringContext, CoverLetterContext } from "./prompts";
 import { Rule } from "./db";
+import { ensureTailoredDirectory } from "./job-artifacts";
+import { jobArtifactPath } from "./validation";
+
+function tagged(text: string, name: string): string | null {
+  const match = text.match(new RegExp(`<${name}>\\s*([\\s\\S]*?)\\s*</${name}>`, "i"));
+  return match?.[1]?.trim() || null;
+}
 
 export interface TailorResumeOptions {
   jobId: number;
@@ -26,23 +32,17 @@ export async function tailorResume(opts: TailorResumeOptions): Promise<TailorRes
     return { success: false, error: "CURSOR_API_KEY is not set in environment variables." };
   }
 
-  const baseResumePath = path.join(process.cwd(), "resumes", "base-resume.md");
+  const baseResumePath = `${process.cwd()}/resumes/base-resume.md`;
   if (!fs.existsSync(baseResumePath)) {
     return { success: false, error: "Base resume not found. Please upload your base resume first." };
   }
 
-  const tailoredDir = path.join(process.cwd(), "resumes", "tailored");
-  if (!fs.existsSync(tailoredDir)) {
-    fs.mkdirSync(tailoredDir, { recursive: true });
-  }
-
-  const outputPath = path.join(tailoredDir, `job-${opts.jobId}.md`);
-  const notesPath = path.join(tailoredDir, `job-${opts.jobId}-notes.md`);
+  ensureTailoredDirectory();
+  const outputPath = jobArtifactPath(opts.jobId, "resume");
+  const notesPath = jobArtifactPath(opts.jobId, "notes");
 
   const ctx: TailoringContext = {
-    baseResumePath,
-    outputPath,
-    notesPath,
+    baseResume: fs.readFileSync(baseResumePath, "utf-8"),
     jobTitle: opts.title,
     company: opts.company,
     jobDescription: opts.description,
@@ -56,7 +56,6 @@ export async function tailorResume(opts: TailorResumeOptions): Promise<TailorRes
     const result = await Agent.prompt(prompt, {
       apiKey,
       model: { id: "composer-2.5" },
-      local: { cwd: process.cwd() },
     });
 
     if (result.status === "error") {
@@ -67,14 +66,18 @@ export async function tailorResume(opts: TailorResumeOptions): Promise<TailorRes
       };
     }
 
-    // Verify the file was written
-    if (!fs.existsSync(outputPath)) {
+    const text = result.result ?? "";
+    const resume = tagged(text, "TAILORED_RESUME");
+    const notes = tagged(text, "TAILORING_NOTES");
+    if (!resume || !notes) {
       return {
         success: false,
         agentId: result.id,
-        error: "Agent completed but the tailored resume file was not created.",
+        error: "AI response did not contain a valid resume and notes. Please try again.",
       };
     }
+    fs.writeFileSync(outputPath, `${resume}\n`, "utf-8");
+    fs.writeFileSync(notesPath, `${notes}\n`, "utf-8");
 
     return {
       success: true,
@@ -116,21 +119,16 @@ export async function generateCoverLetter(opts: GenerateCoverLetterOptions): Pro
     return { success: false, error: "CURSOR_API_KEY is not set in environment variables." };
   }
 
-  const baseResumePath = path.join(process.cwd(), "resumes", "base-resume.md");
+  const baseResumePath = `${process.cwd()}/resumes/base-resume.md`;
   if (!fs.existsSync(baseResumePath)) {
     return { success: false, error: "Base resume not found. Please upload your base resume first." };
   }
 
-  const tailoredDir = path.join(process.cwd(), "resumes", "tailored");
-  if (!fs.existsSync(tailoredDir)) {
-    fs.mkdirSync(tailoredDir, { recursive: true });
-  }
-
-  const outputPath = path.join(tailoredDir, `job-${opts.jobId}-cover-letter.md`);
+  ensureTailoredDirectory();
+  const outputPath = jobArtifactPath(opts.jobId, "cover-letter");
 
   const ctx: CoverLetterContext = {
-    baseResumePath,
-    outputPath,
+    baseResume: fs.readFileSync(baseResumePath, "utf-8"),
     jobTitle: opts.title,
     company: opts.company,
     jobDescription: opts.description,
@@ -143,7 +141,6 @@ export async function generateCoverLetter(opts: GenerateCoverLetterOptions): Pro
     const result = await Agent.prompt(prompt, {
       apiKey,
       model: { id: "composer-2.5" },
-      local: { cwd: process.cwd() },
     });
 
     if (result.status === "error") {
@@ -154,13 +151,15 @@ export async function generateCoverLetter(opts: GenerateCoverLetterOptions): Pro
       };
     }
 
-    if (!fs.existsSync(outputPath)) {
+    const coverLetter = tagged(result.result ?? "", "COVER_LETTER");
+    if (!coverLetter) {
       return {
         success: false,
         agentId: result.id,
-        error: "Agent completed but the cover letter file was not created.",
+        error: "AI response did not contain a valid cover letter. Please try again.",
       };
     }
+    fs.writeFileSync(outputPath, `${coverLetter}\n`, "utf-8");
 
     return {
       success: true,

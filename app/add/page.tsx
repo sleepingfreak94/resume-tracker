@@ -87,7 +87,9 @@ export default function AddJobPage() {
           <span className="text-sm font-medium text-indigo-200">Paste &amp; Parse</span>
           <span className="text-xs text-gray-500 ml-1">— paste raw job text and AI fills the form automatically</span>
         </div>
+        <label htmlFor="raw-job-text" className="sr-only">Raw job posting text</label>
         <textarea
+          id="raw-job-text"
           value={pasteText}
           onChange={(e) => { setPasteText(e.target.value); setParseSuccess(false); setParseError(null); }}
           rows={5}
@@ -95,10 +97,10 @@ export default function AddJobPage() {
           className="w-full bg-gray-900/70 border border-indigo-900/50 rounded-lg px-3 py-2.5 text-sm text-gray-200 placeholder-gray-600 outline-none focus:border-indigo-500 transition-colors resize-none leading-relaxed"
         />
         {parseError && (
-          <p className="text-xs text-red-400">{parseError}</p>
+          <p role="alert" className="text-xs text-red-400">{parseError}</p>
         )}
         {parseSuccess && (
-          <p className="text-xs text-green-400">Fields filled from AI extraction. Review and adjust as needed.</p>
+          <p role="status" className="text-xs text-green-400">Fields filled from AI extraction. Review and adjust as needed.</p>
         )}
         <button
           type="button"
@@ -121,18 +123,19 @@ export default function AddJobPage() {
       </div>
 
       {error && (
-        <div className="px-4 py-3 rounded-lg text-sm bg-red-900/50 border border-red-800 text-red-300">
+        <div role="alert" className="px-4 py-3 rounded-lg text-sm bg-red-900/50 border border-red-800 text-red-300">
           {error}
         </div>
       )}
 
       <form onSubmit={handleSubmit} className="space-y-5">
-        <div className="grid grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div>
-            <label className="block text-sm font-medium text-gray-300 mb-1.5">
+            <label htmlFor="company" className="block text-sm font-medium text-gray-300 mb-1.5">
               Company <span className="text-red-400">*</span>
             </label>
             <input
+              id="company"
               value={form.company}
               onChange={set("company")}
               required
@@ -141,10 +144,11 @@ export default function AddJobPage() {
             />
           </div>
           <div>
-            <label className="block text-sm font-medium text-gray-300 mb-1.5">
+            <label htmlFor="job-title" className="block text-sm font-medium text-gray-300 mb-1.5">
               Job Title <span className="text-red-400">*</span>
             </label>
             <input
+              id="job-title"
               value={form.title}
               onChange={set("title")}
               required
@@ -155,10 +159,11 @@ export default function AddJobPage() {
         </div>
 
         <div>
-          <label className="block text-sm font-medium text-gray-300 mb-1.5">
+          <label htmlFor="job-link" className="block text-sm font-medium text-gray-300 mb-1.5">
             Job Link
           </label>
           <input
+            id="job-link"
             value={form.job_link}
             onChange={set("job_link")}
             type="url"
@@ -169,12 +174,13 @@ export default function AddJobPage() {
 
         <div>
           <div className="flex items-center justify-between mb-1.5">
-            <label className="block text-sm font-medium text-gray-300">
+            <label htmlFor="job-description" className="block text-sm font-medium text-gray-300">
               Job Description <span className="text-red-400">*</span>
             </label>
             <span className="text-xs text-gray-600">{charCount} chars</span>
           </div>
           <textarea
+            id="job-description"
             value={form.description}
             onChange={set("description")}
             required

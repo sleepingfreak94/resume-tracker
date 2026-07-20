@@ -1,15 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { buildDocxBuffer } from "@/lib/md-to-docx";
-
-const CORS = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type",
-};
-
-export async function OPTIONS() {
-  return new NextResponse(null, { status: 204, headers: CORS });
-}
+import { sanitizeDownloadFilename } from "@/lib/validation";
 
 export async function POST(req: NextRequest) {
   try {
@@ -19,18 +10,18 @@ export async function POST(req: NextRequest) {
     }
 
     const buffer = await buildDocxBuffer(content);
-    const outFilename = filename ?? "resume.docx";
+    const base = sanitizeDownloadFilename(filename, "resume.docx");
+    const outFilename = base.toLowerCase().endsWith(".docx") ? base : `${base}.docx`;
 
     return new NextResponse(new Uint8Array(buffer), {
       status: 200,
       headers: {
-        ...CORS,
         "Content-Type":
           "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "Content-Disposition": `attachment; filename="${outFilename}"`,
       },
     });
   } catch (err) {
-    return NextResponse.json({ error: String(err) }, { status: 500, headers: CORS });
+    return NextResponse.json({ error: String(err) }, { status: 500 });
   }
 }

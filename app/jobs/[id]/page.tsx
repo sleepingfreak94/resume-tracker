@@ -70,12 +70,16 @@ export default function JobDetailsPage() {
   const [coverLetterContent, setCoverLetterContent] = useState<string | null>(null);
   const [converting, setConverting] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [editDraft, setEditDraft] = useState({ company: "", title: "", description: "", job_link: "" });
 
   const fetchJob = useCallback(async () => {
     const res = await fetch(`/api/jobs/${id}`);
     if (!res.ok) { router.push("/"); return; }
     const data = await res.json();
     setJob(data);
+    setEditDraft({ company: data.company, title: data.title, description: data.description, job_link: data.job_link ?? "" });
     setLoading(false);
   }, [id, router]);
 
@@ -110,6 +114,7 @@ export default function JobDetailsPage() {
       .then((data) => {
         if (!ignore && data) {
           setJob(data);
+          setEditDraft({ company: data.company, title: data.title, description: data.description, job_link: data.job_link ?? "" });
           setLoading(false);
         }
       })
@@ -164,11 +169,12 @@ export default function JobDetailsPage() {
       const res = await fetch(`/api/tailor/${id}`, { method: "POST" });
       const data = await res.json();
       if (!res.ok || !data.success) {
-        alert(`Generation failed: ${data.error || "Unknown error"}`);
+        setNotice(`Generation failed: ${data.error || "Unknown error"}`);
       } else {
         await Promise.all([fetchJob(), fetchContent()]);
       }
     } catch {
+      setNotice("Generation failed because the server could not be reached.");
       await fetchJob();
     } finally {
       setGenerating(false);
@@ -181,7 +187,7 @@ export default function JobDetailsPage() {
       const res = await fetch(`/api/cover-letter/${id}`, { method: "POST" });
       const data = await res.json();
       if (!res.ok || !data.success) {
-        alert(`Cover letter generation failed: ${data.error || "Unknown error"}`);
+        setNotice(`Cover letter generation failed: ${data.error || "Unknown error"}`);
       } else {
         const clRes = await fetch(`/api/resume/cover-letter/${id}`);
         const clData = await clRes.json();
@@ -189,7 +195,7 @@ export default function JobDetailsPage() {
         setTab("cover-letter");
       }
     } catch {
-      // ignore
+      setNotice("Cover letter generation failed because the server could not be reached.");
     } finally {
       setGeneratingCoverLetter(false);
     }
@@ -198,6 +204,22 @@ export default function JobDetailsPage() {
   const handleDelete = async () => {
     await fetch(`/api/jobs/${id}`, { method: "DELETE" });
     router.push("/");
+  };
+
+  const handleSaveDetails = async () => {
+    const response = await fetch(`/api/jobs/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...editDraft, job_link: editDraft.job_link || null }),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      setNotice(data.error || "Unable to update job details.");
+      return;
+    }
+    setJob(data);
+    setEditing(false);
+    setNotice("Job details updated.");
   };
 
   async function downloadDocx() {
@@ -232,6 +254,8 @@ export default function JobDetailsPage() {
 
   if (!job) return null;
 
+  const needsDataReview = job.title.length > 100 || /show more|applicants|reposted|promoted|\d+\s+(minute|hour|day)s? ago/i.test(job.title);
+
   const tabs: { id: Tab; label: string; dot?: boolean }[] = [
     { id: "resume", label: "Tailored Resume", dot: !!resumeContent },
     { id: "cover-letter", label: "Cover Letter", dot: !!coverLetterContent },
@@ -243,6 +267,11 @@ export default function JobDetailsPage() {
 
   return (
     <div className="space-y-0 -mt-2">
+      {notice && (
+        <div role="status" className="mb-4 flex items-start justify-between gap-3 rounded-xl border border-indigo-900 bg-indigo-950/40 px-4 py-3 text-sm text-indigo-100">
+          <span>{notice}</span><button type="button" aria-label="Dismiss message" onClick={() => setNotice(null)} className="text-indigo-300 hover:text-white">×</button>
+        </div>
+      )}
       {/* Breadcrumb */}
       <div className="flex items-center gap-2 text-sm text-gray-500 mb-5">
         <Link href="/" className="hover:text-gray-300 transition-colors">Dashboard</Link>
@@ -254,20 +283,21 @@ export default function JobDetailsPage() {
 
       {/* Hero header */}
       <div className="bg-gray-900 border border-gray-800 rounded-2xl p-6 mb-6">
+        {needsDataReview && !editing && <div className="mb-4 rounded-lg border border-amber-900 bg-amber-950/40 px-3 py-2 text-sm text-amber-200">This imported title may include job-board page text. Use “Edit details” to clean it up before generating a resume.</div>}
         <div className="flex items-start justify-between gap-4 flex-wrap">
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-3 flex-wrap">
-              <h1 className="text-2xl font-bold text-white">{job.company}</h1>
+              <h1 className="text-2xl font-bold text-white break-words">{job.company}</h1>
               <StatusBadge status={job.status} />
               {atsScore != null && <ATSScoreBadge score={atsScore} size="md" />}
             </div>
-            <div className="mt-1 flex items-center gap-2">
+            <div className="mt-1 flex items-center gap-2 min-w-0">
               {job.job_link ? (
                 <a
                   href={job.job_link}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-gray-400 hover:text-indigo-400 hover:underline inline-flex items-center gap-1 text-sm transition-colors"
+                  className="text-gray-400 hover:text-indigo-400 hover:underline inline-flex items-start gap-1 text-sm transition-colors break-words min-w-0"
                 >
                   {job.title}
                   <svg className="w-3 h-3 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -275,10 +305,10 @@ export default function JobDetailsPage() {
                   </svg>
                 </a>
               ) : (
-                <span className="text-gray-400 text-sm">{job.title}</span>
+                <span className="text-gray-400 text-sm break-words">{job.title}</span>
               )}
             </div>
-            <div className="flex items-center gap-4 mt-3 text-xs text-gray-500">
+            <div className="flex flex-wrap items-center gap-4 mt-3 text-xs text-gray-400">
               <span>Added {formatDate(job.created_at)}</span>
               {job.last_activity_at && (
                 <span>Last activity {daysSince(job.last_activity_at)}d ago</span>
@@ -290,7 +320,10 @@ export default function JobDetailsPage() {
           </div>
 
           {/* Actions */}
-          <div className="flex items-center gap-2 flex-wrap flex-shrink-0">
+          <div className="flex items-center gap-2 flex-wrap w-full lg:w-auto lg:flex-shrink-0">
+            <button type="button" onClick={() => setEditing((value) => !value)} className="flex items-center px-3 py-2 bg-gray-800 hover:bg-gray-700 text-gray-200 rounded-lg text-sm font-medium border border-gray-700">
+              {editing ? "Cancel edit" : "Edit details"}
+            </button>
             {(job.status === "pending" || job.status === "ready") && (
               <button
                 onClick={handleGenerate}
@@ -364,6 +397,7 @@ export default function JobDetailsPage() {
 
             {/* Status select */}
             <select
+              aria-label={`Status for ${job.title} at ${job.company}`}
               value={job.status}
               onChange={(e) => handleStatusChange(e.target.value as JobStatus)}
               disabled={statusChanging || job.status === "generating"}
@@ -382,6 +416,7 @@ export default function JobDetailsPage() {
               </div>
             ) : (
               <button
+                aria-label={`Delete ${job.title} at ${job.company}`}
                 onClick={() => setDeleteConfirm(true)}
                 className="p-2 text-gray-600 hover:text-red-400 rounded-lg hover:bg-gray-800 border border-transparent hover:border-gray-700 transition-colors"
                 title="Delete job"
@@ -393,10 +428,21 @@ export default function JobDetailsPage() {
             )}
           </div>
         </div>
+        {editing && (
+          <div className="mt-5 grid gap-4 border-t border-gray-800 pt-5">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <label className="grid gap-1.5 text-sm text-gray-300">Company<input value={editDraft.company} onChange={(event) => setEditDraft((draft) => ({ ...draft, company: event.target.value }))} className="rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white" /></label>
+              <label className="grid gap-1.5 text-sm text-gray-300">Job title<input value={editDraft.title} onChange={(event) => setEditDraft((draft) => ({ ...draft, title: event.target.value }))} className="rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white" /></label>
+            </div>
+            <label className="grid gap-1.5 text-sm text-gray-300">Job link<input type="url" value={editDraft.job_link} onChange={(event) => setEditDraft((draft) => ({ ...draft, job_link: event.target.value }))} className="rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white" /></label>
+            <label className="grid gap-1.5 text-sm text-gray-300">Description<textarea rows={10} value={editDraft.description} onChange={(event) => setEditDraft((draft) => ({ ...draft, description: event.target.value }))} className="rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white" /></label>
+            <button type="button" onClick={handleSaveDetails} className="w-fit rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500">Save details</button>
+          </div>
+        )}
       </div>
 
       {/* Main content: tabs on left, chat on right */}
-      <div className="flex gap-6 items-start">
+      <div className="flex flex-col xl:flex-row gap-6 items-stretch xl:items-start min-w-0">
         {/* Tabs panel */}
         <div className="flex-1 min-w-0 bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden">
           {/* Tab bar */}
@@ -498,7 +544,7 @@ export default function JobDetailsPage() {
         </div>
 
         {/* Chat sidebar */}
-        <div className="w-[360px] flex-shrink-0 bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden">
+        <div className="w-full xl:w-[360px] xl:flex-shrink-0 bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden">
           <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
             <p className="text-sm font-medium text-white">Resume Chat</p>
             {chatCount > 0 && (
@@ -520,7 +566,7 @@ export default function JobDetailsPage() {
       </div>
 
       {/* Meta footer */}
-      <div className="mt-4 flex items-center gap-4 text-xs text-gray-600">
+      <div className="mt-4 flex flex-wrap items-center gap-2 sm:gap-4 text-xs text-gray-400 break-all">
         <span>Created {formatDateLong(job.created_at)}</span>
         <span>·</span>
         <span>Updated {formatDateLong(job.updated_at)}</span>

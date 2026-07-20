@@ -1,25 +1,24 @@
 import { NextRequest, NextResponse } from "next/server";
 import fs from "fs";
-import { getJob, updateJobStatus, listRules, upsertATSScore, logActivity } from "@/lib/db";
+import { claimJobGeneration, getJob, updateJobStatus, listRules, upsertATSScore, logActivity } from "@/lib/db";
 import { tailorResume } from "@/lib/agent";
 import { computeATSScore } from "@/lib/ats-scorer";
+import { parsePositiveId } from "@/lib/validation";
 
 export async function POST(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const jobId = Number(id);
+  const jobId = parsePositiveId(id);
+  if (!jobId) return NextResponse.json({ error: "Invalid job id" }, { status: 400 });
 
   try {
     const job = getJob(jobId);
     if (!job) return NextResponse.json({ error: "Job not found" }, { status: 404 });
 
-    if (job.status === "generating") {
+    if (!claimJobGeneration(jobId)) {
       return NextResponse.json({ error: "Resume generation already in progress" }, { status: 409 });
     }
 
     const rules = listRules();
-
-    // Mark as generating
-    updateJobStatus(jobId, "generating");
 
     // Run the agent (this is async — it will block until agent completes)
     const result = await tailorResume({

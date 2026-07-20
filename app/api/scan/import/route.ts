@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getDb, createJob } from "@/lib/db";
+import { getDb } from "@/lib/db";
 import type { ScannedJob } from "@/lib/scanner";
+import { validateJobInput } from "@/lib/validation";
 
 export async function POST(req: NextRequest) {
   try {
@@ -9,25 +10,23 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "jobs array is required" }, { status: 400 });
     }
 
-    // ponytail: wrap in a transaction so partial failures don't leave orphaned rows
+    const validated = jobs.map(validateJobInput);
     const insert = getDb().transaction(() => {
       let imported = 0;
-      for (const job of jobs) {
-        if (!job.title || !job.company || !job.description) continue;
-        createJob({
-          company: job.company,
-          title: job.title,
-          description: job.description,
-          job_link: job.job_link || null,
-        });
-        imported++;
+      let skipped = 0;
+      const statement = getDb().prepare(
+        "INSERT OR IGNORE INTO jobs (company, title, description, job_link) VALUES (?, ?, ?, ?)"
+      );
+      for (const job of validated) {
+        const result = statement.run(job.company, job.title, job.description, job.job_link);
+        if (result.changes === 1) imported++;
+        else skipped++;
       }
-      return imported;
+      return { imported, skipped };
     });
 
-    const imported = insert();
-    return NextResponse.json({ imported });
+    return NextResponse.json(insert());
   } catch (err) {
-    return NextResponse.json({ error: String(err) }, { status: 500 });
+    return NextResponse.json({ error: err instanceof Error ? err.message : "Import failed" }, { status: 400 });
   }
 }

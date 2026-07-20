@@ -110,7 +110,10 @@ export default function ProfilePage() {
   return (
     <div className="max-w-2xl mx-auto">
       <div className="mb-6">
-        <h1 className="text-2xl font-bold text-gray-100">My Profile</h1>
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <h1 className="text-2xl font-bold text-gray-100">My Profile</h1>
+          <a href="/api/backup" download className="rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-sm font-medium text-gray-200 hover:bg-gray-800">Download backup</a>
+        </div>
         <p className="text-sm text-gray-400 mt-1">
           This data is used by the browser extension to auto-fill job application forms.
         </p>
@@ -138,26 +141,26 @@ export default function ProfilePage() {
         {/* Personal Info */}
         <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
           <h2 className="text-sm font-semibold text-gray-300 mb-4 uppercase tracking-wide">Personal Information</h2>
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
-              <label className={labelCls}>First Name</label>
-              <input className={inputCls} value={profile.first_name} onChange={(e) => set("first_name", e.target.value)} placeholder="Jane" />
+              <label htmlFor="first-name" className={labelCls}>First Name</label>
+              <input id="first-name" autoComplete="given-name" className={inputCls} value={profile.first_name} onChange={(e) => set("first_name", e.target.value)} placeholder="Jane" />
             </div>
             <div>
-              <label className={labelCls}>Last Name</label>
-              <input className={inputCls} value={profile.last_name} onChange={(e) => set("last_name", e.target.value)} placeholder="Doe" />
+              <label htmlFor="last-name" className={labelCls}>Last Name</label>
+              <input id="last-name" autoComplete="family-name" className={inputCls} value={profile.last_name} onChange={(e) => set("last_name", e.target.value)} placeholder="Doe" />
             </div>
             <div>
-              <label className={labelCls}>Email</label>
-              <input className={inputCls} type="email" value={profile.email} onChange={(e) => set("email", e.target.value)} placeholder="jane@example.com" />
+              <label htmlFor="email" className={labelCls}>Email</label>
+              <input id="email" autoComplete="email" className={inputCls} type="email" value={profile.email} onChange={(e) => set("email", e.target.value)} placeholder="jane@example.com" />
             </div>
             <div>
-              <label className={labelCls}>Phone</label>
-              <input className={inputCls} type="tel" value={profile.phone} onChange={(e) => set("phone", e.target.value)} placeholder="+1 (555) 000-0000" />
+              <label htmlFor="phone" className={labelCls}>Phone</label>
+              <input id="phone" autoComplete="tel" className={inputCls} type="tel" value={profile.phone} onChange={(e) => set("phone", e.target.value)} placeholder="+1 (555) 000-0000" />
             </div>
-            <div className="col-span-2">
-              <label className={labelCls}>Location (City, State)</label>
-              <input className={inputCls} value={profile.location} onChange={(e) => set("location", e.target.value)} placeholder="San Francisco, CA" />
+            <div className="sm:col-span-2">
+              <label htmlFor="location" className={labelCls}>Location (City, State)</label>
+              <input id="location" autoComplete="address-level2" className={inputCls} value={profile.location} onChange={(e) => set("location", e.target.value)} placeholder="San Francisco, CA" />
             </div>
           </div>
         </div>
@@ -165,22 +168,22 @@ export default function ProfilePage() {
         {/* Professional Info */}
         <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
           <h2 className="text-sm font-semibold text-gray-300 mb-4 uppercase tracking-wide">Professional Information</h2>
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
-              <label className={labelCls}>Current Company</label>
-              <input className={inputCls} value={profile.current_company} onChange={(e) => set("current_company", e.target.value)} placeholder="Acme Corp" />
+              <label htmlFor="current-company" className={labelCls}>Current Company</label>
+              <input id="current-company" autoComplete="organization" className={inputCls} value={profile.current_company} onChange={(e) => set("current_company", e.target.value)} placeholder="Acme Corp" />
             </div>
             <div>
-              <label className={labelCls}>Current Title</label>
-              <input className={inputCls} value={profile.current_title} onChange={(e) => set("current_title", e.target.value)} placeholder="Senior Engineer" />
+              <label htmlFor="current-title" className={labelCls}>Current Title</label>
+              <input id="current-title" autoComplete="organization-title" className={inputCls} value={profile.current_title} onChange={(e) => set("current_title", e.target.value)} placeholder="Senior Engineer" />
             </div>
             <div>
-              <label className={labelCls}>Years of Experience</label>
-              <input className={inputCls} type="number" min="0" max="60" value={profile.years_experience} onChange={(e) => set("years_experience", e.target.value)} placeholder="5" />
+              <label htmlFor="years-experience" className={labelCls}>Years of Experience</label>
+              <input id="years-experience" className={inputCls} type="number" min="0" max="60" value={profile.years_experience} onChange={(e) => set("years_experience", e.target.value)} placeholder="5" />
             </div>
             <div>
-              <label className={labelCls}>Education Level</label>
-              <select className={selectCls} value={profile.education_level} onChange={(e) => set("education_level", e.target.value)}>
+              <label htmlFor="education-level" className={labelCls}>Education Level</label>
+              <select id="education-level" className={selectCls} value={profile.education_level} onChange={(e) => set("education_level", e.target.value)}>
                 <option value="">Select…</option>
                 {EDUCATION_OPTIONS.map((o) => <option key={o} value={o}>{o}</option>)}
               </select>
@@ -193,12 +196,12 @@ export default function ProfilePage() {
           <h2 className="text-sm font-semibold text-gray-300 mb-4 uppercase tracking-wide">Online Presence</h2>
           <div className="space-y-4">
             <div>
-              <label className={labelCls}>LinkedIn URL</label>
-              <input className={inputCls} type="url" value={profile.linkedin_url} onChange={(e) => set("linkedin_url", e.target.value)} placeholder="https://linkedin.com/in/janedoe" />
+              <label htmlFor="linkedin-url" className={labelCls}>LinkedIn URL</label>
+              <input id="linkedin-url" autoComplete="url" className={inputCls} type="url" value={profile.linkedin_url} onChange={(e) => set("linkedin_url", e.target.value)} placeholder="https://linkedin.com/in/janedoe" />
             </div>
             <div>
-              <label className={labelCls}>Portfolio / Website</label>
-              <input className={inputCls} type="url" value={profile.portfolio_url} onChange={(e) => set("portfolio_url", e.target.value)} placeholder="https://janedoe.dev" />
+              <label htmlFor="portfolio-url" className={labelCls}>Portfolio / Website</label>
+              <input id="portfolio-url" className={inputCls} type="url" value={profile.portfolio_url} onChange={(e) => set("portfolio_url", e.target.value)} placeholder="https://janedoe.dev" />
             </div>
           </div>
         </div>
@@ -206,10 +209,10 @@ export default function ProfilePage() {
         {/* Work Authorization */}
         <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
           <h2 className="text-sm font-semibold text-gray-300 mb-4 uppercase tracking-wide">Work Authorization</h2>
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
-              <label className={labelCls}>Authorization Type</label>
-              <select className={selectCls} value={profile.work_authorization} onChange={(e) => set("work_authorization", e.target.value)}>
+              <label htmlFor="work-authorization" className={labelCls}>Authorization Type</label>
+              <select id="work-authorization" className={selectCls} value={profile.work_authorization} onChange={(e) => set("work_authorization", e.target.value)}>
                 <option value="">Select…</option>
                 {WORK_AUTH_OPTIONS.map((o) => <option key={o} value={o}>{o}</option>)}
               </select>
@@ -254,13 +257,13 @@ export default function ProfilePage() {
         </div>
 
         {error && (
-          <div className="bg-red-950 border border-red-800 rounded-lg px-4 py-3 text-sm text-red-300">
+          <div role="alert" className="bg-red-950 border border-red-800 rounded-lg px-4 py-3 text-sm text-red-300">
             {error}
           </div>
         )}
 
         {saved && (
-          <div className="bg-green-950 border border-green-800 rounded-lg px-4 py-3 text-sm text-green-300">
+          <div role="status" className="bg-green-950 border border-green-800 rounded-lg px-4 py-3 text-sm text-green-300">
             Profile saved — the extension will use this data on your next fill.
           </div>
         )}

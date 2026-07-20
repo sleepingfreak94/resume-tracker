@@ -21,14 +21,9 @@ const SUGGESTED_COMPANIES = [
   { name: "HashiCorp",     url: "https://jobs.lever.co/hashicorp" },
   { name: "MongoDB",       url: "https://job-boards.greenhouse.io/mongodb" },
   { name: "Snowflake",     url: "https://job-boards.greenhouse.io/snowflake" },
-  { name: "Elastic",       url: "https://jobs.ashbyhq.com/elastic" },
   { name: "Grafana Labs",  url: "https://job-boards.greenhouse.io/grafanalabs" },
   { name: "Postman",       url: "https://job-boards.greenhouse.io/postman" },
-  { name: "BrowserStack",  url: "https://jobs.ashbyhq.com/browserstack" },
   { name: "Sauce Labs",    url: "https://jobs.lever.co/saucelabs" },
-  { name: "Cypress.io",    url: "https://jobs.ashbyhq.com/cypress" },
-  { name: "Testim",        url: "https://jobs.ashbyhq.com/testim" },
-  { name: "Mabl",          url: "https://jobs.ashbyhq.com/mabl" },
   { name: "LaunchDarkly",  url: "https://jobs.lever.co/launchdarkly" },
   { name: "Checkly",       url: "https://jobs.ashbyhq.com/checkly" },
   { name: "Percy",         url: "https://job-boards.greenhouse.io/percy" },
@@ -238,7 +233,7 @@ export default function ScanPage() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-start justify-between gap-4">
+      <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-white">Portal Scanner</h1>
           <p className="text-gray-400 mt-1 text-sm">

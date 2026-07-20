@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useState } from "react";
 
 const links = [
   { href: "/", label: "Dashboard" },
@@ -15,9 +16,10 @@ const links = [
 
 export default function Navigation() {
   const pathname = usePathname();
+  const [open, setOpen] = useState(false);
 
   return (
-    <nav className="bg-gray-900 border-b border-gray-800">
+    <nav className="relative bg-gray-900 border-b border-gray-800">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex items-center justify-between h-16">
           <div className="flex items-center gap-2">
@@ -28,7 +30,7 @@ export default function Navigation() {
             </div>
             <span className="text-white font-semibold text-lg">Resume Tracker</span>
           </div>
-          <div className="flex items-center gap-1">
+          <div className="hidden lg:flex items-center gap-1">
             {links.map((link) => (
               <Link
                 key={link.href}
@@ -43,8 +45,32 @@ export default function Navigation() {
               </Link>
             ))}
           </div>
+          <button
+            type="button"
+            aria-label={open ? "Close navigation menu" : "Open navigation menu"}
+            aria-expanded={open}
+            aria-controls="mobile-navigation"
+            onClick={() => setOpen((value) => !value)}
+            className="lg:hidden inline-flex h-10 w-10 items-center justify-center rounded-lg text-gray-300 hover:bg-gray-800 hover:text-white"
+          >
+            <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d={open ? "M6 18L18 6M6 6l12 12" : "M4 6h16M4 12h16M4 18h16"} />
+            </svg>
+          </button>
         </div>
       </div>
+      {open && (
+        <div id="mobile-navigation" className="lg:hidden border-t border-gray-800 px-4 py-3 grid gap-1 bg-gray-900">
+          {links.map((link) => {
+            const active = link.href === "/" ? pathname === "/" : pathname.startsWith(link.href);
+            return (
+              <Link key={link.href} href={link.href} onClick={() => setOpen(false)} aria-current={active ? "page" : undefined} className={`px-3 py-2.5 rounded-lg text-sm font-medium ${active ? "bg-indigo-600 text-white" : "text-gray-300 hover:bg-gray-800 hover:text-white"}`}>
+                {link.label}
+              </Link>
+            );
+          })}
+        </div>
+      )}
     </nav>
   );
 }

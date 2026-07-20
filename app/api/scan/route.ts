@@ -1,22 +1,18 @@
 import { NextResponse } from "next/server";
-import path from "path";
-import fs from "fs";
-import { getDb } from "@/lib/db";
+import { getDb, listPortals } from "@/lib/db";
 import { scanGreenhouse, scanAshby, scanLever, type Portal, type ScannedJob } from "@/lib/scanner";
-
-function loadPortals(): Portal[] {
-  const p = path.join(process.cwd(), "portals.json");
-  return JSON.parse(fs.readFileSync(p, "utf-8")) as Portal[];
-}
+import { canonicalizeJobUrl } from "@/lib/validation";
 
 export async function POST() {
   try {
-    const portals = loadPortals();
+    const portals = listPortals();
 
     // Fetch all existing job links for deduplication in one query
     const existing = new Set<string>(
       (getDb().prepare("SELECT job_link FROM jobs WHERE job_link IS NOT NULL").all() as { job_link: string }[]).map(
-        (r) => r.job_link
+        (r) => {
+          try { return canonicalizeJobUrl(r.job_link) ?? r.job_link; } catch { return r.job_link; }
+        }
       )
     );
 
@@ -40,10 +36,13 @@ export async function POST() {
         return;
       }
       for (const job of r.value) {
-        if (!job.job_link || existing.has(job.job_link)) {
+        let link: string | null = null;
+        try { link = canonicalizeJobUrl(job.job_link); } catch { /* invalid scanner result */ }
+        if (!link || existing.has(link)) {
           skipped++;
         } else {
-          jobs.push(job);
+          existing.add(link);
+          jobs.push({ ...job, job_link: link });
         }
       }
     });

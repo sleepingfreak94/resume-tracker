@@ -215,8 +215,9 @@ export default function JobResumeChat({ jobId, onResumeUpdated, onMessagesChange
       )}
 
       <div className="border-t border-gray-800 px-3 pt-2 pb-1 flex items-center justify-between">
-        <span className="text-xs text-gray-600">Model</span>
+        <label htmlFor={`chat-model-${jobId}`} className="text-xs text-gray-400">Model</label>
         <select
+          id={`chat-model-${jobId}`}
           value={model}
           onChange={(e) => { const v = e.target.value as ModelId; setModel(v); try { localStorage.setItem(MODEL_STORAGE_KEY, v); } catch { /* quota */ } }}
           disabled={sending}
@@ -229,6 +230,7 @@ export default function JobResumeChat({ jobId, onResumeUpdated, onMessagesChange
       </div>
       <div className="px-3 pb-3 flex gap-2">
         <input
+          aria-label="Message resume coach"
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && handleSend()}
@@ -237,6 +239,8 @@ export default function JobResumeChat({ jobId, onResumeUpdated, onMessagesChange
           className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs text-gray-100 placeholder-gray-600 outline-none focus:border-indigo-500 transition-colors disabled:opacity-50"
         />
         <button
+          type="button"
+          aria-label={sending ? "Sending message" : "Send message"}
           onClick={handleSend}
           disabled={sending || !input.trim()}
           className="p-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-gray-700 disabled:text-gray-500 text-white rounded-lg transition-colors"

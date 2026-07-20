@@ -8,6 +8,7 @@ import {
   uploadDocx,
 } from "@/lib/google-drive";
 import { getSetting, setSetting } from "@/lib/db";
+import { sanitizeDownloadFilename } from "@/lib/validation";
 
 function driveSettingKey(key: string) {
   return `drive_url:${key}`;
@@ -19,7 +20,7 @@ function needsAuthResponse() {
 
 export async function GET(req: NextRequest) {
   const key = req.nextUrl.searchParams.get("key");
-  if (!key) {
+  if (!key || !/^[a-zA-Z0-9:_-]{1,100}$/.test(key)) {
     return NextResponse.json({ error: "key is required" }, { status: 400 });
   }
   return NextResponse.json({ url: getSetting(driveSettingKey(key)) });
@@ -44,10 +45,11 @@ export async function POST(req: NextRequest) {
     }
 
     const buffer = await buildDocxBuffer(content);
-    const outFilename = filename ?? "resume.docx";
+    const base = sanitizeDownloadFilename(filename, "resume.docx");
+    const outFilename = base.toLowerCase().endsWith(".docx") ? base : `${base}.docx`;
     const { fileId, url } = await uploadDocx(buffer, outFilename);
 
-    if (storageKey) {
+    if (typeof storageKey === "string" && /^[a-zA-Z0-9:_-]{1,100}$/.test(storageKey)) {
       setSetting(driveSettingKey(storageKey), url);
     }
 

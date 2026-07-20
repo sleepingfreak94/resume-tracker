@@ -12,6 +12,7 @@ A local-first job application tracker built with Next.js 16, React 19, SQLite, a
 - Greenhouse, Lever, and Ashby portal scanning and importing
 - Chrome extension for LinkedIn import and application form autofill
 - Local SQLite storage in `data/resume-tracker.db`
+- Search, sorting, pagination, responsive mobile views, and JSON backups
 
 ## Requirements
 
@@ -53,6 +54,16 @@ npm run start      # Serve the production build
 
 The extension can import job details, match tracked jobs, download tailored resumes, and autofill supported application forms. Its localhost port can be changed in the popup.
 
+For stricter extension access, copy the extension ID from `chrome://extensions` into `RESUME_TRACKER_EXTENSION_ID` in `.env.local`. Without it, any installed Chrome extension may call the local API; regular websites and non-loopback hosts are still rejected.
+
+## Security and backups
+
+The development and production commands bind to `127.0.0.1`. API requests reject non-loopback hosts and cross-origin web pages. AI generation receives resume/job text as untrusted data and does not receive filesystem access; the server validates and writes generated files to known paths.
+
+Download a portable JSON backup from **My Profile → Download backup**. It includes jobs, activities, ATS scores, rules, portals, profile fields, and Markdown resumes. It deliberately excludes OAuth state, Google tokens, and other settings.
+
+This remains a single-user, local-first application—not a hosted multi-user service. Do not expose it through a public tunnel or reverse proxy without adding full authentication, authorization, encrypted secret storage, and a production database migration strategy.
+
 ## Local and generated data
 
 The following files contain local credentials or generated output and are ignored by Git:
@@ -62,4 +73,4 @@ The following files contain local credentials or generated output and are ignore
 - `output/`
 - `.next/`
 
-The SQLite database and personal/generated Markdown files under `resumes/` are local data and are also ignored by Git. Back them up before deleting or replacing them.
+The SQLite database and personal/generated Markdown files under `resumes/` are local data and are also ignored by Git. Use the built-in JSON backup before deleting or replacing them.

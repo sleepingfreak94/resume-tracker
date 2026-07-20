@@ -57,26 +57,18 @@ export async function scanGreenhouse(slug: string, company: string): Promise<Sca
 }
 
 export async function scanAshby(slug: string, company: string): Promise<ScannedJob[]> {
-  const res = await fetch("https://api.ashbyhq.com/posting-public/job-posting/list", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify({ organizationHostedJobsPageName: slug }),
+  const res = await fetch(`https://api.ashbyhq.com/posting-api/job-board/${encodeURIComponent(slug)}`, {
+    headers: { Accept: "application/json" },
     signal: AbortSignal.timeout(15_000),
   });
-  // ponytail: Ashby locked down their public API in 2025 — all orgs now return 401.
-  // Keep the scanner function so manual "Add by URL" still stores the entry,
-  // but surface a clear message instead of a raw HTTP status.
-  if (res.status === 401) {
-    throw new Error(`Ashby (${company}): API now requires authentication — remove this portal or check for a public feed`);
-  }
   if (!res.ok) throw new Error(`Ashby ${slug} (${company}): HTTP ${res.status}`);
   const data = await res.json();
-  return (data.results ?? []).map((j: Record<string, unknown>) => ({
+  return (data.jobs ?? []).filter((j: Record<string, unknown>) => j.isListed !== false).map((j: Record<string, unknown>) => ({
     title: String(j.title ?? ""),
     company,
     description: stripHtml(String((j.descriptionHtml as string) ?? (j.descriptionPlain as string) ?? "")),
     job_link: String(j.jobUrl ?? ""),
-    location: String((j.locationName as string) ?? ""),
+    location: String((j.location as string) ?? (j.workplaceType as string) ?? ""),
   }));
 }
 

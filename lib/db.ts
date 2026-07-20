@@ -95,11 +95,21 @@ function initSchema(db: Database.Database) {
       education_level TEXT,
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+
+    CREATE TABLE IF NOT EXISTS portals (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      ats TEXT NOT NULL CHECK(ats IN ('greenhouse', 'ashby', 'lever')),
+      slug TEXT NOT NULL,
+      UNIQUE(ats, slug)
+    );
   `);
 
   migrateJobStatuses(db);
   migrateAddLastActivity(db);
   migrateAddProfileWorkAuth(db);
+  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS jobs_job_link_unique ON jobs(job_link) WHERE job_link IS NOT NULL");
+  seedPortals(db);
 
   // Seed default rules if none exist
   const count = (db.prepare("SELECT COUNT(*) as c FROM rules").get() as { c: number }).c;
@@ -121,6 +131,26 @@ function initSchema(db: Database.Database) {
       insert.run(text, priority);
     }
   }
+}
+
+function seedPortals(db: Database.Database) {
+  const seeded = db.prepare("SELECT value FROM settings WHERE key = 'portals_seeded_v1'").get() as { value: string } | undefined;
+  if (seeded?.value === "1") return;
+  const count = (db.prepare("SELECT COUNT(*) AS count FROM portals").get() as { count: number }).count;
+  if (count > 0) {
+    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('portals_seeded_v1', '1')").run();
+    return;
+  }
+  const defaultsPath = path.join(process.cwd(), "portals.json");
+  if (!fs.existsSync(defaultsPath)) return;
+  try {
+    const portals = JSON.parse(fs.readFileSync(defaultsPath, "utf-8")) as Portal[];
+    const insert = db.prepare("INSERT OR IGNORE INTO portals (name, ats, slug) VALUES (?, ?, ?)");
+    for (const portal of portals) insert.run(portal.name, portal.ats, portal.slug);
+  } catch {
+    // The app can still start with an empty portal list if the optional seed is invalid.
+  }
+  db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('portals_seeded_v1', '1')").run();
 }
 
 const JOBS_STATUS_SCHEMA_KEY = "jobs_status_v3";
@@ -225,6 +255,21 @@ export function updateJobStatus(
   ).run(status, extra.tailored_resume_path ?? null, extra.agent_id ?? null, id);
 }
 
+export function claimJobGeneration(id: number): boolean {
+  const result = getDb().prepare(
+    "UPDATE jobs SET status = 'generating', updated_at = datetime('now') WHERE id = ? AND status != 'generating'"
+  ).run(id);
+  return result.changes === 1;
+}
+
+export function updateJobDetails(id: number, data: Pick<Job, "company" | "title" | "description" | "job_link">) {
+  getDb().prepare(
+    `UPDATE jobs SET company = ?, title = ?, description = ?, job_link = ?,
+     updated_at = datetime('now') WHERE id = ?`
+  ).run(data.company, data.title, data.description, data.job_link, id);
+  return getJob(id);
+}
+
 export function deleteJob(id: number) {
   getDb().prepare("DELETE FROM jobs WHERE id = ?").run(id);
 }
@@ -274,6 +319,36 @@ export function getSetting(key: string): string | null {
 
 export function setSetting(key: string, value: string) {
   getDb().prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").run(key, value);
+}
+
+export function deleteSetting(key: string) {
+  getDb().prepare("DELETE FROM settings WHERE key = ?").run(key);
+}
+
+// --- Portal helpers ---
+
+export interface Portal {
+  id?: number;
+  name: string;
+  ats: "greenhouse" | "ashby" | "lever";
+  slug: string;
+}
+
+export function listPortals(): Portal[] {
+  return getDb().prepare("SELECT id, name, ats, slug FROM portals ORDER BY name").all() as Portal[];
+}
+
+export function createPortal(data: Omit<Portal, "id">): Portal {
+  const result = getDb().prepare("INSERT INTO portals (name, ats, slug) VALUES (?, ?, ?)").run(
+    data.name,
+    data.ats,
+    data.slug
+  );
+  return getDb().prepare("SELECT id, name, ats, slug FROM portals WHERE id = ?").get(result.lastInsertRowid) as Portal;
+}
+
+export function deletePortal(ats: Portal["ats"], slug: string): boolean {
+  return getDb().prepare("DELETE FROM portals WHERE ats = ? AND slug = ?").run(ats, slug).changes === 1;
 }
 
 // --- ATS Score helpers ---

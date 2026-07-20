@@ -26,4 +26,18 @@ describe("ATS scorer", () => {
     assert.equal(result.keyword_score, 100);
     assert.deepEqual(result.missing_keywords, []);
   });
+
+  it("counts three or more experience bullets", () => {
+    const result = computeATSScore(
+      "## Experience\n- Built APIs\n- Added tests\n- Improved monitoring",
+      "Software engineer",
+    );
+    assert.equal(result.experience_score, 85);
+  });
+
+  it("matches whole keywords instead of substrings", () => {
+    const result = computeATSScore("JavaScript developer", "Java developer");
+    assert.ok(result.missing_keywords.includes("java"));
+    assert.ok(!result.matched_keywords.includes("java"));
+  });
 });

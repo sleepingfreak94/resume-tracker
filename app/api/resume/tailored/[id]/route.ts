@@ -1,31 +1,23 @@
 import { NextRequest, NextResponse } from "next/server";
-import path from "path";
 import fs from "fs";
 import { getJob } from "@/lib/db";
-
-const CORS = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type",
-};
-
-export async function OPTIONS() {
-  return new NextResponse(null, { status: 204, headers: CORS });
-}
+import { jobArtifactPath, parsePositiveId } from "@/lib/validation";
 
 export async function GET(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
-    const job = getJob(Number(id));
+    const jobId = parsePositiveId(id);
+    if (!jobId) return NextResponse.json({ error: "Invalid job id" }, { status: 400 });
+    const job = getJob(jobId);
     if (!job) return NextResponse.json({ error: "Job not found" }, { status: 404 });
 
-    const filePath = path.join(process.cwd(), "resumes", "tailored", `job-${id}.md`);
+    const filePath = jobArtifactPath(jobId, "resume");
     if (!fs.existsSync(filePath)) {
-      return NextResponse.json({ content: null, exists: false }, { headers: CORS });
+      return NextResponse.json({ content: null, exists: false });
     }
     const content = fs.readFileSync(filePath, "utf-8");
-    return NextResponse.json({ content, exists: true }, { headers: CORS });
+    return NextResponse.json({ content, exists: true });
   } catch (err) {
-    return NextResponse.json({ error: String(err) }, { status: 500, headers: CORS });
+    return NextResponse.json({ error: String(err) }, { status: 500 });
   }
 }

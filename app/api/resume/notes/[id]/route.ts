@@ -1,11 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
-import path from "path";
 import fs from "fs";
+import { jobArtifactPath, parsePositiveId } from "@/lib/validation";
 
 export async function GET(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
-    const filePath = path.join(process.cwd(), "resumes", "tailored", `job-${id}-notes.md`);
+    const jobId = parsePositiveId(id);
+    if (!jobId) return NextResponse.json({ error: "Invalid job id" }, { status: 400 });
+    const filePath = jobArtifactPath(jobId, "notes");
     if (!fs.existsSync(filePath)) return NextResponse.json({ content: null, exists: false });
     return NextResponse.json({ content: fs.readFileSync(filePath, "utf-8"), exists: true });
   } catch (err) {

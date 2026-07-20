@@ -18,6 +18,15 @@ body {
   color: var(--foreground);
 }
 
+:where(a, button, input, select, textarea):focus-visible {
+  outline: 2px solid #818cf8;
+  outline-offset: 2px;
+}
+
+button:not(:disabled), select:not(:disabled) {
+  cursor: pointer;
+}
+
 /* Scrollbar styling */
 ::-webkit-scrollbar {
   width: 6px;

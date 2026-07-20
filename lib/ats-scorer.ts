@@ -14,7 +14,6 @@ const STOP_WORDS = new Set([
   "reposted","ago","applicants","applicant","clicked","metropolitan","hiring","hired","people","easy","apply",
 ]);
 
-// ponytail: naive whitespace tokenizer + stop-word filter, good enough for JD keyword match
 function tokenize(text: string): string[] {
   return text
     .toLowerCase()
@@ -50,14 +49,13 @@ function getKeywordSet(text: string): Set<string> {
 
 function scoreKeywords(resume: string, jd: string): { score: number; matched: string[]; missing: string[] } {
   const jdKeywords = getKeywordSet(jd);
-  const resumeText = resume.toLowerCase();
+  const resumeKeywords = getKeywordSet(resume);
 
   const matched: string[] = [];
   const missing: string[] = [];
 
   for (const kw of jdKeywords) {
-    // Check if keyword appears anywhere in resume (not just as whole token)
-    if (resumeText.includes(kw)) {
+    if (resumeKeywords.has(kw)) {
       matched.push(kw);
     } else {
       missing.push(kw);
@@ -92,8 +90,8 @@ function extractSkillKeywords(text: string): string[] {
 function scoreSkills(resume: string, jd: string): number {
   const jdSkills = extractSkillKeywords(jd);
   if (jdSkills.length === 0) return 80; // No specific skills required
-  const resumeLower = resume.toLowerCase();
-  const matched = jdSkills.filter((s) => resumeLower.includes(s));
+  const resumeKeywords = getKeywordSet(resume);
+  const matched = jdSkills.filter((skill) => resumeKeywords.has(skill));
   return Math.round((matched.length / jdSkills.length) * 100);
 }
 
@@ -104,7 +102,7 @@ function scoreExperience(resume: string, jd: string): number {
 
   // Check experience section presence
   const hasExperienceSection = /experience|work history/i.test(resume);
-  const hasBulletPoints = (resume.match(/^[\s]*[-•*]/m) || []).length > 2;
+  const hasBulletPoints = (resume.match(/^[\s]*[-•*]/gm) || []).length > 2;
   const hasQuantifiedAchievements = /\d+%|\$\d+|\d+x\b|\d+k\b/i.test(resume);
 
   let score = 60;
