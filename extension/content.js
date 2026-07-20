@@ -535,10 +535,9 @@ async function extractLinkedInJobWithRetry(maxAttempts = 10, delayMs = 400) {
 
     if (hasTitle && hasCompany && hasDescription) return result;
 
-    // Search-result pages sometimes render only cards, with no description
-    // panel. Read the selected job's public detail page instead of sending the
-    // entire results page to AI, which can confuse LinkedIn UI with the title.
-    if (!/\/jobs\/view\//.test(window.location.href) && i === 0) {
+    // Signed-in search and detail pages can both virtualize or omit the job
+    // content. Recover from LinkedIn's job endpoint for either page type.
+    if (i === 0) {
       const fetched = await fetchSelectedJobDetails();
       if (fetched) {
         return {
