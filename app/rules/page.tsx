@@ -109,7 +109,7 @@ export default function RulesPage() {
       <div>
         <h1 className="text-2xl font-bold text-white">Tailoring Rules</h1>
         <p className="text-gray-400 mt-1 text-sm">
-          These rules guide the Cursor AI agent when tailoring your resume for each job.{" "}
+          These rules guide the selected AI provider when tailoring your resume for each job.{" "}
           <span className="text-indigo-400 font-medium">{activeCount} active</span> of {rules.length} rules.
         </p>
       </div>

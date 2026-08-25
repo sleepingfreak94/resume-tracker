@@ -103,12 +103,77 @@ function initSchema(db: Database.Database) {
       slug TEXT NOT NULL,
       UNIQUE(ats, slug)
     );
+
+    CREATE TABLE IF NOT EXISTS application_answers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      canonical_question TEXT NOT NULL,
+      normalized_question TEXT NOT NULL,
+      answer_json TEXT NOT NULL,
+      answer_type TEXT NOT NULL,
+      source TEXT NOT NULL DEFAULT 'user',
+      confidence TEXT NOT NULL DEFAULT 'high',
+      scope TEXT NOT NULL DEFAULT 'global' CHECK(scope IN ('global', 'job')),
+      job_id INTEGER REFERENCES jobs(id) ON DELETE SET NULL,
+      is_confirmed INTEGER NOT NULL DEFAULT 0,
+      use_count INTEGER NOT NULL DEFAULT 0,
+      category TEXT NOT NULL DEFAULT 'other',
+      correction_count INTEGER NOT NULL DEFAULT 0,
+      last_confirmed_at TEXT,
+      last_used_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS application_answer_aliases (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      answer_id INTEGER NOT NULL REFERENCES application_answers(id) ON DELETE CASCADE,
+      question_text TEXT NOT NULL,
+      normalized_question TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(answer_id, normalized_question)
+    );
+
+    CREATE TABLE IF NOT EXISTS application_question_queue (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      question_text TEXT NOT NULL,
+      normalized_question TEXT NOT NULL,
+      question_kind TEXT NOT NULL,
+      options_json TEXT NOT NULL DEFAULT '[]',
+      page_url TEXT,
+      job_id INTEGER REFERENCES jobs(id) ON DELETE SET NULL,
+      suggested_answer_json TEXT,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'resolved', 'dismissed')),
+      occurrence_count INTEGER NOT NULL DEFAULT 1,
+      first_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+      last_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+      resolved_answer_id INTEGER REFERENCES application_answers(id) ON DELETE SET NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS linkedin_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      keywords TEXT NOT NULL,
+      location TEXT,
+      max_jobs INTEGER NOT NULL DEFAULT 15,
+      auto_submit INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'queued'
+        CHECK(status IN ('queued','running','tailoring','done','stopped','failed')),
+      -- ponytail: items stored as JSON blob; not queryable per-item. Fine for a single-user run log.
+      -- upgrade path: extract to a linkedin_run_items table if reporting is needed.
+      items_json TEXT NOT NULL DEFAULT '[]',
+      note TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
 
   migrateJobStatuses(db);
   migrateAddLastActivity(db);
   migrateAddProfileWorkAuth(db);
+  migrateApplicationAnswerIntelligence(db);
   db.exec("CREATE UNIQUE INDEX IF NOT EXISTS jobs_job_link_unique ON jobs(job_link) WHERE job_link IS NOT NULL");
+  db.exec("CREATE INDEX IF NOT EXISTS application_answers_normalized_idx ON application_answers(normalized_question, scope)");
+  db.exec("CREATE INDEX IF NOT EXISTS application_aliases_normalized_idx ON application_answer_aliases(normalized_question)");
+  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS application_queue_pending_unique ON application_question_queue(normalized_question) WHERE status = 'pending'");
   seedPortals(db);
 
   // Seed default rules if none exist
@@ -211,6 +276,24 @@ function migrateAddProfileWorkAuth(db: Database.Database) {
   db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").run("profile_work_auth_v1", "1");
 }
 
+function migrateApplicationAnswerIntelligence(db: Database.Database) {
+  const row = db.prepare("SELECT value FROM settings WHERE key = ?").get("application_answer_intelligence_v1") as { value: string } | undefined;
+  if (row?.value === "1") return;
+  for (const column of [
+    "category TEXT NOT NULL DEFAULT 'other'",
+    "correction_count INTEGER NOT NULL DEFAULT 0",
+    "last_confirmed_at TEXT",
+  ]) {
+    try {
+      db.exec(`ALTER TABLE application_answers ADD COLUMN ${column}`);
+    } catch {
+      // Column may already exist when the database was created from the current schema.
+    }
+  }
+  db.prepare("UPDATE application_answers SET last_confirmed_at = updated_at WHERE is_confirmed = 1 AND last_confirmed_at IS NULL").run();
+  db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").run("application_answer_intelligence_v1", "1");
+}
+
 // --- Job helpers ---
 
 export interface Job {
@@ -253,6 +336,14 @@ export function updateJobStatus(
     `UPDATE jobs SET status = ?, tailored_resume_path = COALESCE(?, tailored_resume_path),
      agent_id = COALESCE(?, agent_id), updated_at = datetime('now') WHERE id = ?`
   ).run(status, extra.tailored_resume_path ?? null, extra.agent_id ?? null, id);
+}
+
+export function invalidateJobGeneration(id: number): void {
+  const db = getDb();
+  db.prepare(
+    "UPDATE jobs SET status = 'pending', tailored_resume_path = NULL, agent_id = NULL, updated_at = datetime('now') WHERE id = ?"
+  ).run(id);
+  db.prepare("DELETE FROM ats_scores WHERE job_id = ?").run(id);
 }
 
 export function claimJobGeneration(id: number): boolean {
@@ -472,4 +563,78 @@ export function upsertProfile(data: Partial<Omit<Profile, "id" | "updated_at">>)
   vals.push(1);
   db.prepare(`UPDATE profile SET ${sets.join(", ")} WHERE id = ?`).run(...vals);
   return getProfile();
+}
+
+// --- LinkedIn run helpers ---
+
+export type LinkedInRunStatus = "queued" | "running" | "tailoring" | "done" | "stopped" | "failed";
+
+export interface LinkedInRunItem {
+  jobId: number | null;
+  title: string;
+  company: string;
+  url: string;
+  applyType: "easy_apply" | "external";
+  outcome: "applied" | "needs_manual" | "failed" | "skipped";
+  note: string;
+}
+
+export interface LinkedInRun {
+  id: number;
+  keywords: string;
+  location: string | null;
+  max_jobs: number;
+  auto_submit: number;
+  status: LinkedInRunStatus;
+  items_json: string;
+  note: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export function createLinkedInRun(data: Pick<LinkedInRun, "keywords" | "location" | "max_jobs" | "auto_submit">): LinkedInRun {
+  const db = getDb();
+  const result = db.prepare(
+    "INSERT INTO linkedin_runs (keywords, location, max_jobs, auto_submit) VALUES (?, ?, ?, ?)"
+  ).run(data.keywords, data.location ?? null, data.max_jobs, data.auto_submit);
+  return db.prepare("SELECT * FROM linkedin_runs WHERE id = ?").get(result.lastInsertRowid) as LinkedInRun;
+}
+
+export function getLinkedInRun(id: number): LinkedInRun | undefined {
+  return getDb().prepare("SELECT * FROM linkedin_runs WHERE id = ?").get(id) as LinkedInRun | undefined;
+}
+
+export function getActiveLinkedInRun(): LinkedInRun | undefined {
+  return getDb()
+    .prepare("SELECT * FROM linkedin_runs WHERE status IN ('queued','running','tailoring') ORDER BY created_at DESC LIMIT 1")
+    .get() as LinkedInRun | undefined;
+}
+
+export function listLinkedInRuns(limit = 20): LinkedInRun[] {
+  return getDb().prepare("SELECT * FROM linkedin_runs ORDER BY created_at DESC LIMIT ?").all(limit) as LinkedInRun[];
+}
+
+export function updateLinkedInRun(id: number, data: Partial<Pick<LinkedInRun, "status" | "note">>) {
+  const db = getDb();
+  const sets: string[] = ["updated_at = datetime('now')"];
+  const vals: unknown[] = [];
+  if (data.status !== undefined) { sets.push("status = ?"); vals.push(data.status); }
+  if (data.note !== undefined) { sets.push("note = ?"); vals.push(data.note); }
+  vals.push(id);
+  db.prepare(`UPDATE linkedin_runs SET ${sets.join(", ")} WHERE id = ?`).run(...vals);
+}
+
+export function appendLinkedInRunItem(id: number, item: LinkedInRunItem): void {
+  const db = getDb();
+  const run = db.prepare("SELECT items_json FROM linkedin_runs WHERE id = ?").get(id) as { items_json: string } | undefined;
+  if (!run) throw new Error(`LinkedIn run ${id} not found`);
+  const items: LinkedInRunItem[] = JSON.parse(run.items_json);
+  const existingIndex = items.findIndex((existing) =>
+    (item.jobId != null && existing.jobId === item.jobId) ||
+    (item.jobId == null && item.url && existing.url === item.url)
+  );
+  if (existingIndex >= 0) items[existingIndex] = item;
+  else items.push(item);
+  db.prepare("UPDATE linkedin_runs SET items_json = ?, updated_at = datetime('now') WHERE id = ?")
+    .run(JSON.stringify(items), id);
 }

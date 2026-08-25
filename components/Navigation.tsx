@@ -11,7 +11,9 @@ const links = [
   { href: "/add", label: "Add Job" },
   { href: "/resume", label: "Resume" },
   { href: "/rules", label: "Rules" },
+  { href: "/answers", label: "Answers" },
   { href: "/profile", label: "Profile" },
+  { href: "/settings", label: "Settings" },
 ];
 
 export default function Navigation() {

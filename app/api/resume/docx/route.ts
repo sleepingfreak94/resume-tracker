@@ -5,8 +5,11 @@ import { sanitizeDownloadFilename } from "@/lib/validation";
 export async function POST(req: NextRequest) {
   try {
     const { content, filename } = await req.json();
-    if (!content) {
+    if (typeof content !== "string" || !content.trim()) {
       return NextResponse.json({ error: "content is required" }, { status: 400 });
+    }
+    if (content.length > 1_000_000) {
+      return NextResponse.json({ error: "Resume must be under 1 MB" }, { status: 400 });
     }
 
     const buffer = await buildDocxBuffer(content);

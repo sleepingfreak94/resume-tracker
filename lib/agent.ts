@@ -1,9 +1,9 @@
-import { Agent, CursorAgentError } from "@cursor/sdk";
 import fs from "fs";
 import { buildTailoringPrompt, buildCoverLetterPrompt, TailoringContext, CoverLetterContext } from "./prompts";
 import { Rule } from "./db";
 import { ensureTailoredDirectory } from "./job-artifacts";
 import { jobArtifactPath } from "./validation";
+import { generateAIText } from "./ai-provider";
 
 function tagged(text: string, name: string): string | null {
   const match = text.match(new RegExp(`<${name}>\\s*([\\s\\S]*?)\\s*</${name}>`, "i"));
@@ -17,6 +17,7 @@ export interface TailorResumeOptions {
   description: string;
   jobLink: string | null;
   rules: Rule[];
+  signal?: AbortSignal;
 }
 
 export interface TailorResumeResult {
@@ -27,11 +28,6 @@ export interface TailorResumeResult {
 }
 
 export async function tailorResume(opts: TailorResumeOptions): Promise<TailorResumeResult> {
-  const apiKey = process.env.CURSOR_API_KEY;
-  if (!apiKey) {
-    return { success: false, error: "CURSOR_API_KEY is not set in environment variables." };
-  }
-
   const baseResumePath = `${process.cwd()}/resumes/base-resume.md`;
   if (!fs.existsSync(baseResumePath)) {
     return { success: false, error: "Base resume not found. Please upload your base resume first." };
@@ -53,26 +49,19 @@ export async function tailorResume(opts: TailorResumeOptions): Promise<TailorRes
   const prompt = buildTailoringPrompt(ctx);
 
   try {
-    const result = await Agent.prompt(prompt, {
-      apiKey,
-      model: { id: "composer-2.5" },
+    const result = await generateAIText({
+      workload: "generation",
+      prompt,
+      maxOutputTokens: 24_000,
+      signal: opts.signal,
     });
-
-    if (result.status === "error") {
-      return {
-        success: false,
-        agentId: result.id,
-        error: `Agent run failed (run id: ${result.id}). Check the Cursor dashboard for details.`,
-      };
-    }
-
-    const text = result.result ?? "";
+    const text = result.text;
     const resume = tagged(text, "TAILORED_RESUME");
     const notes = tagged(text, "TAILORING_NOTES");
     if (!resume || !notes) {
       return {
         success: false,
-        agentId: result.id,
+        agentId: result.runId,
         error: "AI response did not contain a valid resume and notes. Please try again.",
       };
     }
@@ -82,15 +71,9 @@ export async function tailorResume(opts: TailorResumeOptions): Promise<TailorRes
     return {
       success: true,
       tailoredResumePath: outputPath,
-      agentId: result.id,
+      agentId: result.runId,
     };
   } catch (err) {
-    if (err instanceof CursorAgentError) {
-      return {
-        success: false,
-        error: `Agent startup failed: ${err.message}${err.isRetryable ? " (retryable)" : ""}`,
-      };
-    }
     return {
       success: false,
       error: err instanceof Error ? err.message : String(err),
@@ -104,6 +87,7 @@ export interface GenerateCoverLetterOptions {
   title: string;
   description: string;
   jobLink: string | null;
+  signal?: AbortSignal;
 }
 
 export interface GenerateCoverLetterResult {
@@ -114,11 +98,6 @@ export interface GenerateCoverLetterResult {
 }
 
 export async function generateCoverLetter(opts: GenerateCoverLetterOptions): Promise<GenerateCoverLetterResult> {
-  const apiKey = process.env.CURSOR_API_KEY;
-  if (!apiKey) {
-    return { success: false, error: "CURSOR_API_KEY is not set in environment variables." };
-  }
-
   const baseResumePath = `${process.cwd()}/resumes/base-resume.md`;
   if (!fs.existsSync(baseResumePath)) {
     return { success: false, error: "Base resume not found. Please upload your base resume first." };
@@ -126,9 +105,10 @@ export async function generateCoverLetter(opts: GenerateCoverLetterOptions): Pro
 
   ensureTailoredDirectory();
   const outputPath = jobArtifactPath(opts.jobId, "cover-letter");
+  const tailoredResumePath = jobArtifactPath(opts.jobId, "resume");
 
   const ctx: CoverLetterContext = {
-    baseResume: fs.readFileSync(baseResumePath, "utf-8"),
+    baseResume: fs.readFileSync(fs.existsSync(tailoredResumePath) ? tailoredResumePath : baseResumePath, "utf-8"),
     jobTitle: opts.title,
     company: opts.company,
     jobDescription: opts.description,
@@ -138,24 +118,17 @@ export async function generateCoverLetter(opts: GenerateCoverLetterOptions): Pro
   const prompt = buildCoverLetterPrompt(ctx);
 
   try {
-    const result = await Agent.prompt(prompt, {
-      apiKey,
-      model: { id: "composer-2.5" },
+    const result = await generateAIText({
+      workload: "generation",
+      prompt,
+      maxOutputTokens: 8_000,
+      signal: opts.signal,
     });
-
-    if (result.status === "error") {
-      return {
-        success: false,
-        agentId: result.id,
-        error: `Agent run failed (run id: ${result.id}). Check the Cursor dashboard for details.`,
-      };
-    }
-
-    const coverLetter = tagged(result.result ?? "", "COVER_LETTER");
+    const coverLetter = tagged(result.text, "COVER_LETTER");
     if (!coverLetter) {
       return {
         success: false,
-        agentId: result.id,
+        agentId: result.runId,
         error: "AI response did not contain a valid cover letter. Please try again.",
       };
     }
@@ -164,15 +137,9 @@ export async function generateCoverLetter(opts: GenerateCoverLetterOptions): Pro
     return {
       success: true,
       coverLetterPath: outputPath,
-      agentId: result.id,
+      agentId: result.runId,
     };
   } catch (err) {
-    if (err instanceof CursorAgentError) {
-      return {
-        success: false,
-        error: `Agent startup failed: ${err.message}${err.isRetryable ? " (retryable)" : ""}`,
-      };
-    }
     return {
       success: false,
       error: err instanceof Error ? err.message : String(err),

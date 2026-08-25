@@ -12,6 +12,12 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Local AI-agent tooling is not part of the application source.
+    ".agents/**",
+    ".claude/**",
+    ".claude-flow/**",
+    ".codex/**",
+    ".swarm/**",
   ]),
 ]);
 

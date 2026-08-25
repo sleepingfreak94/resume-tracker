@@ -3,7 +3,7 @@ import { getJob, logActivity } from "@/lib/db";
 import { generateCoverLetter } from "@/lib/agent";
 import { parsePositiveId } from "@/lib/validation";
 
-export async function POST(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const jobId = parsePositiveId(id);
   if (!jobId) return NextResponse.json({ error: "Invalid job id" }, { status: 400 });
@@ -18,6 +18,7 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ id
       title: job.title,
       description: job.description,
       jobLink: job.job_link,
+      signal: req.signal,
     });
 
     if (result.success) {

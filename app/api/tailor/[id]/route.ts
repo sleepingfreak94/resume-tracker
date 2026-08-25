@@ -5,7 +5,7 @@ import { tailorResume } from "@/lib/agent";
 import { computeATSScore } from "@/lib/ats-scorer";
 import { parsePositiveId } from "@/lib/validation";
 
-export async function POST(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const jobId = parsePositiveId(id);
   if (!jobId) return NextResponse.json({ error: "Invalid job id" }, { status: 400 });
@@ -28,6 +28,7 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ id
       description: job.description,
       jobLink: job.job_link,
       rules,
+      signal: req.signal,
     });
 
     if (result.success && result.tailoredResumePath) {

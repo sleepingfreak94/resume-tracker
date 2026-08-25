@@ -314,7 +314,7 @@ export default function JobDetailsPage() {
                 <span>Last activity {daysSince(job.last_activity_at)}d ago</span>
               )}
               {job.agent_id && (
-                <span className="font-mono opacity-60">agent: {job.agent_id.slice(0, 8)}…</span>
+                <span className="font-mono opacity-60">AI run: {job.agent_id.slice(0, 8)}…</span>
               )}
             </div>
           </div>
@@ -573,7 +573,7 @@ export default function JobDetailsPage() {
         {job.agent_id && (
           <>
             <span>·</span>
-            <span className="font-mono">Agent run: {job.agent_id}</span>
+            <span className="font-mono">AI run: {job.agent_id}</span>
           </>
         )}
       </div>

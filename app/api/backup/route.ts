@@ -16,7 +16,7 @@ export async function GET() {
   const db = getDb();
   const resumesDirectory = path.join(process.cwd(), "resumes");
   const backup = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     exportedAt: new Date().toISOString(),
     jobs: db.prepare("SELECT * FROM jobs ORDER BY id").all(),
     activities: db.prepare("SELECT * FROM job_activities ORDER BY id").all(),
@@ -24,6 +24,11 @@ export async function GET() {
     rules: db.prepare("SELECT * FROM rules ORDER BY id").all(),
     profile: db.prepare("SELECT * FROM profile ORDER BY id").all(),
     portals: db.prepare("SELECT * FROM portals ORDER BY id").all(),
+    applicationAnswers: db.prepare("SELECT * FROM application_answers ORDER BY id").all(),
+    applicationAnswerAliases: db.prepare("SELECT * FROM application_answer_aliases ORDER BY id").all(),
+    applicationQuestionQueue: db.prepare("SELECT * FROM application_question_queue ORDER BY id").all(),
+    applicationAutomationSettings: db.prepare("SELECT key, value FROM settings WHERE key LIKE 'autofill_%' ORDER BY key").all(),
+    aiSettings: db.prepare("SELECT key, value FROM settings WHERE key LIKE 'ai_%' ORDER BY key").all(),
     resumes: {
       base: readMarkdownFiles(resumesDirectory),
       tailored: readMarkdownFiles(path.join(resumesDirectory, "tailored")),

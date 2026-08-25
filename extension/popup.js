@@ -106,7 +106,7 @@ async function initAutoFillTab() {
   // Show page context
   const statusEl = $("autofill-page-status");
   const isAppPage = tab?.url?.includes(`localhost:${port}`);
-  const isJobAppPage = tab?.url && /apply|application|careers|greenhouse\.io|lever\.co|workday\.com|ashbyhq\.com|icims\.com|taleo\.net/i.test(tab.url);
+  const isJobAppPage = tab?.url && /apply|application|careers|linkedin\.com\/jobs\/(view|search-results)|greenhouse\.io|lever\.co|workday\.com|ashbyhq\.com|icims\.com|taleo\.net/i.test(tab.url);
 
   statusEl.innerHTML = "";
   const badge = document.createElement("div");
@@ -180,6 +180,60 @@ function esc(s) {
   return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+async function controllerState(tabId) {
+  const [{ result }] = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: () => ({
+      ready: Boolean(window.__rtAutoFill?.autoApply && window.__rtAutoFill?.fillPage),
+      version: window.__rtAutoFill?.version || null,
+      loadedFlag: Boolean(window.__resumeTrackerAutoFillLoaded),
+      readyState: document.readyState,
+    }),
+  });
+  return result || { ready: false, version: null, loadedFlag: false, readyState: "unknown" };
+}
+
+async function ensureAutoFillController(tabId) {
+  await chrome.scripting.executeScript({ target: { tabId }, files: ["content-autofill.js"] });
+  let state = await controllerState(tabId);
+  if (state.ready) return state;
+
+  // Recover a tab left with the old script's loaded flag but no controller.
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    func: () => {
+      window.__resumeTrackerAutoFillLoaded = false;
+      delete window.__rtAutoFill;
+      document.getElementById("rt-fab")?.remove();
+    },
+  });
+  await chrome.scripting.executeScript({ target: { tabId }, files: ["content-autofill.js"] });
+  state = await controllerState(tabId);
+  if (!state.ready) {
+    throw new Error(`Autofill controller did not start (page: ${state.readyState}, loaded flag: ${state.loadedFlag ? "yes" : "no"}). Refresh this LinkedIn tab once, then retry.`);
+  }
+  return state;
+}
+
+async function invokeAutoFill(tabId, method, args) {
+  const [{ result }] = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: async (methodName, methodArgs) => {
+      const controller = window.__rtAutoFill;
+      const fn = controller?.[methodName];
+      if (typeof fn !== "function") return { ok: false, error: `Autofill method ${methodName} is unavailable.` };
+      try {
+        return { ok: true, data: await fn(...methodArgs), version: controller.version || null };
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : String(error), version: controller.version || null };
+      }
+    },
+    args: [method, args],
+  });
+  if (!result?.ok) throw new Error(result?.error || "The autofill controller returned no result.");
+  return result.data;
+}
+
 // ── Auto Apply ────────────────────────────────────────────────────────────
 
 async function runAutoApply(fieldsOnly = false) {
@@ -192,10 +246,7 @@ async function runAutoApply(fieldsOnly = false) {
   showStatus(fieldsOnly ? "Filling form fields…" : "Auto applying…", "info", "autofill-status");
 
   try {
-    await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      files: ["content-autofill.js"],
-    });
+    await ensureAutoFillController(tab.id);
 
     let jobId = null;
     if (tab.url) {
@@ -212,11 +263,7 @@ async function runAutoApply(fieldsOnly = false) {
       if (!profileRes.ok) throw new Error(`App not responding on port ${port}`);
       const profile = await profileRes.json();
 
-      const [{ result }] = await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        func: (profileData) => window.__rtAutoFill?.fillPage(profileData) ?? null,
-        args: [profile],
-      });
+      const result = await invokeAutoFill(tab.id, "fillPage", [profile]);
 
       if (!result || result.filled === 0) {
         showStatus("No matching fields found on this page.", "warning", "autofill-status");
@@ -226,26 +273,37 @@ async function runAutoApply(fieldsOnly = false) {
       return;
     }
 
-    const [{ result }] = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      func: (p, j) => window.__rtAutoFill?.autoApply(p, j) ?? null,
-      args: [port, jobId],
-    });
+    const result = await invokeAutoFill(tab.id, "autoApply", [port, jobId]);
 
     if (!result) {
-      showStatus("Could not access the page. Try refreshing it.", "error", "autofill-status");
+      showStatus("Autofill returned no result. Refresh this LinkedIn tab once, then retry.", "error", "autofill-status");
       return;
     }
 
     const parts = [];
     if (result.filled > 0) parts.push(`${result.filled} field${result.filled === 1 ? "" : "s"}`);
-    if (result.resumeUploaded > 0) parts.push("resume uploaded");
+    if (result.resumeUploaded > 0) parts.push(`${String(result.resumeFormat || "docx").toUpperCase()} resume uploaded`);
     if (result.coverLetterFilled > 0) parts.push("cover letter");
+    if (result.aiQuestionsFilled > 0) parts.push(`${result.aiQuestionsFilled} AI answer${result.aiQuestionsFilled === 1 ? "" : "s"}`);
 
     if (parts.length === 0) {
-      showStatus("No matching fields found. Review the form manually.", "warning", "autofill-status");
+      const reason = result.aiError ? ` ${result.aiError}` : "";
+      showStatus(`No matching fields found. Review the form manually.${reason}`, "warning", "autofill-status");
     } else {
-      showStatus(`Auto applied: ${parts.join(", ")}. Review and submit.`, "success", "autofill-status");
+      const review = result.questionsUnanswered > 0
+        ? ` ${result.questionsUnanswered} question${result.questionsUnanswered === 1 ? " needs" : "s need"} your review.`
+        : "";
+      const aiWarning = result.aiError ? ` AI answers were unavailable: ${result.aiError}` : "";
+      const automationText = result.automation?.state === "submitted"
+        ? " Application submitted automatically; verify the confirmation page."
+        : result.automation?.state === "final-review"
+          ? " Final review is on, so submission is waiting for you."
+          : result.automation?.state === "next"
+            ? " Continued to the next application step."
+            : result.automation?.state?.startsWith("paused")
+              ? " Automation paused for your input."
+              : " Review the page before continuing.";
+      showStatus(`Filled: ${parts.join(", ")}.${review}${aiWarning}${automationText}`, result.aiError ? "warning" : "success", "autofill-status");
       if (result.jobId) {
         $("mark-applied-btn").style.display = "block";
         $("mark-applied-btn").dataset.jobId = String(result.jobId);
@@ -283,7 +341,7 @@ async function triggerResumeDownload(jobId = null) {
     }
   }
   $("download-resume-btn").disabled = true;
-  showStatus("Requesting DOCX download…", "info", "autofill-status");
+  showStatus("Requesting resume download…", "info", "autofill-status");
 
   chrome.runtime.sendMessage(
     { type: "DOWNLOAD_RESUME", port, jobId },
@@ -318,6 +376,10 @@ function showResumeModal() {
 
 $("open-profile-btn").addEventListener("click", () => {
   chrome.tabs.create({ url: `http://localhost:${getPort()}/profile` });
+});
+
+$("open-answers-btn").addEventListener("click", () => {
+  chrome.tabs.create({ url: `http://localhost:${getPort()}/answers` });
 });
 
 $("mark-applied-btn").addEventListener("click", async () => {

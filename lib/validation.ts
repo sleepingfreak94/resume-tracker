@@ -1,7 +1,5 @@
 import path from "path";
 
-export const ALLOWED_CURSOR_MODELS = ["composer-2.5-fast", "composer-2.5", "claude-sonnet-5"] as const;
-
 export function parsePositiveId(value: unknown): number | null {
   const number = typeof value === "number" ? value : Number(value);
   return Number.isSafeInteger(number) && number > 0 ? number : null;

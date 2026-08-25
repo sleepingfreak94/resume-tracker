@@ -131,7 +131,7 @@ export default function ProfilePage() {
             <p className="text-xs text-gray-400 mt-0.5">
               Once saved, open the extension on any job application page and click{" "}
               <span className="text-indigo-400 font-medium">Fill This Page</span> to auto-fill detected fields.
-              The extension fetches this profile from <code className="text-xs bg-gray-800 px-1 rounded">localhost/api/profile</code>.
+              The extension combines this profile with your saved <a href="/answers" className="text-[#c7f36b] hover:underline">application answers</a> and AI-generated job context.
             </p>
           </div>
         </div>

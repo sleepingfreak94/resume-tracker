@@ -1,12 +1,13 @@
 import { after, NextRequest, NextResponse } from "next/server";
 import fs from "fs";
 import path from "path";
-import { Agent } from "@cursor/sdk";
 import { getJob, getATSScore, upsertATSScore } from "@/lib/db";
 import { computeATSScore } from "@/lib/ats-scorer";
 import { buildATSAnalysisPrompt, type AIATSAnalysis } from "@/lib/ats-prompts";
 import { logActivity } from "@/lib/db";
 import { jobArtifactPath, parsePositiveId } from "@/lib/validation";
+import { generateAIText } from "@/lib/ai-provider";
+import { getAIKeyStatus, getAISettings } from "@/lib/ai-settings";
 
 export async function GET(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -44,9 +45,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 
     if (aiOnly) {
       // Run only AI analysis — skip heuristic recalculation
-      const apiKey = process.env.CURSOR_API_KEY;
-      if (!apiKey) return NextResponse.json({ error: "CURSOR_API_KEY not configured" }, { status: 500 });
-      await runAIAnalysis(jobId, resume, job.description, job.company, job.title, apiKey);
+      await runAIAnalysis(jobId, resume, job.description, job.company, job.title);
       return NextResponse.json({ success: true });
     }
 
@@ -66,10 +65,12 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     logActivity(jobId, "score_computed", `ATS score computed: ${result.overall_score}/100`);
 
     // Fire off AI analysis asynchronously — don't block the response
-    const apiKey = process.env.CURSOR_API_KEY;
-    if (apiKey) {
+    const settings = getAISettings();
+    const keyStatus = getAIKeyStatus();
+    const selectedProviderConfigured = settings.provider === "codex" || (settings.provider === "openai" ? keyStatus.openaiConfigured : keyStatus.cursorConfigured);
+    if (selectedProviderConfigured) {
       after(async () => {
-        await runAIAnalysis(jobId, resume, job.description, job.company, job.title, apiKey).catch(() => undefined);
+        await runAIAnalysis(jobId, resume, job.description, job.company, job.title).catch(() => undefined);
       });
     }
 
@@ -84,19 +85,41 @@ async function runAIAnalysis(
   resume: string,
   jobDescription: string,
   company: string,
-  title: string,
-  apiKey: string
+  title: string
 ) {
   try {
     const prompt = buildATSAnalysisPrompt(resume, jobDescription, company, title);
-    const result = await Agent.prompt(prompt, {
-      apiKey,
-      model: { id: "composer-2.5" },
+    const result = await generateAIText({
+      workload: "routine",
+      prompt,
+      maxOutputTokens: 6_000,
+      jsonSchema: {
+        name: "ats_analysis",
+        schema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            summary: { type: "string" },
+            strengths: { type: "array", items: { type: "string" } },
+            gaps: { type: "array", items: { type: "string" } },
+            suggestions: { type: "array", items: { type: "string" } },
+            detailedScores: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                technicalSkills: { type: "number", minimum: 0, maximum: 100 },
+                softSkills: { type: "number", minimum: 0, maximum: 100 },
+                experienceDepth: { type: "number", minimum: 0, maximum: 100 },
+                formatting: { type: "number", minimum: 0, maximum: 100 },
+              },
+              required: ["technicalSkills", "softSkills", "experienceDepth", "formatting"],
+            },
+          },
+          required: ["summary", "strengths", "gaps", "suggestions", "detailedScores"],
+        },
+      },
     });
-
-    if (result.status !== "finished") return;
-
-    const text = (result.result ?? "").slice(0, 100_000);
+    const text = result.text.slice(0, 100_000);
     const jsonMatch = text.match(/\{[\s\S]*\}/);
     if (!jsonMatch) return;
 

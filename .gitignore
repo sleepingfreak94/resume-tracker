@@ -23,6 +23,11 @@
 # misc
 .DS_Store
 *.pem
+*.key
+*.p12
+*.pfx
+client_secret*.json
+credentials*.json
 
 # debug
 npm-debug.log*
@@ -41,6 +46,9 @@ yarn-error.log*
 /data/*.db
 /data/*.db-shm
 /data/*.db-wal
+/data/*.db-journal
+/data/*.sqlite
+/data/*.sqlite3
 /resumes/base-resume.md
 /resumes/tailored/
 
@@ -53,3 +61,12 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Local AI-agent configuration, memory, and runtime data
+/.agents/
+/.claude/
+/.claude-flow/
+/.codex/
+/.swarm/
+/.mcp.json
+/ruvector.db

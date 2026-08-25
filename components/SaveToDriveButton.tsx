@@ -54,7 +54,9 @@ export default function SaveToDriveButton({
 
       if (res.status === 401 && data.needsAuth) {
         setConnected(false);
-        window.location.href = `/api/google/auth?returnTo=${encodeURIComponent(returnTo)}`;
+        const authUrl = new URL("/api/google/auth", window.location.origin);
+        authUrl.searchParams.set("returnTo", returnTo);
+        window.location.assign(authUrl.toString());
         return;
       }
 

@@ -29,50 +29,88 @@ function saveMessages(jobId: number, msgs: Message[]) {
   } catch { /* quota */ }
 }
 
-function loadAgentId(jobId: number): string | undefined {
-  return localStorage.getItem(`chat-agent-${jobId}`) ?? undefined;
-}
+const OPENAI_MODELS = [
+  { id: "gpt-5.6-sol", label: "Sol · high" },
+  { id: "gpt-5.6-terra", label: "Terra · high" },
+  { id: "gpt-5.6-luna", label: "Luna · high" },
+] as const;
 
-function saveAgentId(jobId: number, agentId: string) {
-  localStorage.setItem(`chat-agent-${jobId}`, agentId);
-}
-
-const MODELS = [
+const CURSOR_MODELS = [
   { id: "composer-2.5-fast", label: "Fast" },
   { id: "composer-2.5", label: "Balanced" },
   { id: "claude-sonnet-5", label: "Best" },
 ] as const;
 
-type ModelId = typeof MODELS[number]["id"];
-const VALID_MODEL_IDS: ReadonlySet<string> = new Set(MODELS.map((m) => m.id));
-const MODEL_STORAGE_KEY = "chat-model";
-const DEFAULT_MODEL: ModelId = "composer-2.5";
+type Provider = "openai" | "codex" | "cursor";
 
-function loadModel(): ModelId {
+function loadModel(provider: Provider, fallback: string, validIds: ReadonlySet<string>): string {
   try {
-    const saved = localStorage.getItem(MODEL_STORAGE_KEY);
-    // ponytail: evict stale model IDs (e.g. from a previous model list)
-    if (saved && VALID_MODEL_IDS.has(saved)) return saved as ModelId;
-    localStorage.removeItem(MODEL_STORAGE_KEY);
-    return DEFAULT_MODEL;
-  } catch { return DEFAULT_MODEL; }
+    const key = `chat-model-${provider}`;
+    const saved = localStorage.getItem(key);
+    if (saved && validIds.has(saved)) return saved;
+    localStorage.removeItem(key);
+    return fallback;
+  } catch { return fallback; }
+}
+
+function requestHistory(messages: Message[], currentMessage: string) {
+  const history: { role: Message["role"]; content: string }[] = [];
+  let total = currentMessage.length;
+  const candidates = messages.filter((message) => message.text.trim()).slice(-29).reverse();
+  for (const message of candidates) {
+    const content = message.text.slice(0, 20_000);
+    if (total + content.length > 100_000) break;
+    history.unshift({ role: message.role, content });
+    total += content.length;
+  }
+  history.push({ role: "user", content: currentMessage });
+  return history;
 }
 
 export default function JobResumeChat({ jobId, onResumeUpdated, onMessagesChange, className = "" }: JobResumeChatProps) {
   const [messages, setMessages] = useState<Message[]>(() => loadMessages(jobId));
-  const [agentId, setAgentId] = useState<string | undefined>(() => loadAgentId(jobId));
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
-  const [proposal, setProposal] = useState<string | null>(null);
+  const [resumeProposal, setResumeProposal] = useState<string | null>(null);
+  const [coverLetterProposal, setCoverLetterProposal] = useState<string | null>(null);
   const [applying, setApplying] = useState(false);
-  const [model, setModel] = useState<ModelId>(() => loadModel());
+  const [provider, setProvider] = useState<Provider>("openai");
+  const [model, setModel] = useState("gpt-5.6-terra");
+  const [settingsLoading, setSettingsLoading] = useState(true);
   const bottomRef = useRef<HTMLDivElement>(null);
+
+  const models = provider === "cursor" ? CURSOR_MODELS : OPENAI_MODELS;
+
+  useEffect(() => {
+    let ignore = false;
+    const applySettings = (settings: { provider: Provider; chatModel: string; codexChatModel: string }) => {
+      if (ignore) return;
+      const available = settings.provider === "cursor" ? CURSOR_MODELS : OPENAI_MODELS;
+      const fallback = settings.provider === "openai" ? settings.chatModel : settings.provider === "codex" ? settings.codexChatModel : "composer-2.5";
+      setProvider(settings.provider);
+      setModel(loadModel(settings.provider, fallback, new Set(available.map((item) => item.id))));
+      setSettingsLoading(false);
+    };
+    fetch("/api/ai-settings", { cache: "no-store" })
+      .then(async (response) => {
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.error || "Unable to load AI settings");
+        applySettings(body);
+      })
+      .catch(() => setSettingsLoading(false));
+    const onSettingsChanged = (event: Event) => applySettings((event as CustomEvent).detail);
+    window.addEventListener("ai-settings-changed", onSettingsChanged);
+    return () => {
+      ignore = true;
+      window.removeEventListener("ai-settings-changed", onSettingsChanged);
+    };
+  }, []);
 
   useEffect(() => {
     setMessages(loadMessages(jobId));
-    setAgentId(loadAgentId(jobId));
     setInput("");
-    setProposal(null);
+    setResumeProposal(null);
+    setCoverLetterProposal(null);
   }, [jobId]);
 
   useEffect(() => {
@@ -89,7 +127,8 @@ export default function JobResumeChat({ jobId, onResumeUpdated, onMessagesChange
     if (!msg || sending) return;
     setInput("");
     setSending(true);
-    setProposal(null);
+    setResumeProposal(null);
+    setCoverLetterProposal(null);
     setMessages((prev) => [...prev, { role: "user", text: msg }, { role: "assistant", text: "" }]);
     scrollToBottom();
 
@@ -97,8 +136,17 @@ export default function JobResumeChat({ jobId, onResumeUpdated, onMessagesChange
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ jobId, message: msg, agentId, model }),
+        body: JSON.stringify({
+          jobId,
+          message: msg,
+          model,
+          history: requestHistory(messages, msg),
+        }),
       });
+      if (!res.ok || !res.body) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || "Unable to start resume chat");
+      }
       const reader = res.body!.getReader();
       const dec = new TextDecoder();
       let buf = "";
@@ -119,11 +167,8 @@ export default function JobResumeChat({ jobId, onResumeUpdated, onMessagesChange
             });
             bottomRef.current?.scrollIntoView({ behavior: "smooth" });
           } else if (evt.type === "done") {
-            if (evt.agentId) {
-              setAgentId(evt.agentId);
-              saveAgentId(jobId, evt.agentId);
-            }
-            if (evt.proposal) setProposal(evt.proposal);
+            if (evt.resumeProposal || evt.proposal) setResumeProposal(evt.resumeProposal || evt.proposal);
+            if (evt.coverLetterProposal) setCoverLetterProposal(evt.coverLetterProposal);
           } else if (evt.type === "error") {
             setMessages((prev) => {
               const msgs = [...prev];
@@ -144,19 +189,24 @@ export default function JobResumeChat({ jobId, onResumeUpdated, onMessagesChange
     }
   };
 
-  const handleApplyProposal = async () => {
-    if (!proposal) return;
+  const handleApplyProposal = async (documentType: "resume" | "cover_letter", content: string) => {
     setApplying(true);
     try {
-      await fetch("/api/chat", {
+      const applyResponse = await fetch("/api/chat", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ jobId, content: proposal }),
+        body: JSON.stringify({ jobId, content, documentType }),
       });
-      const res = await fetch(`/api/resume/tailored/${jobId}`);
-      const data = await res.json();
-      if (data.exists) onResumeUpdated?.(data.content);
-      setProposal(null);
+      const applyBody = await applyResponse.json();
+      if (!applyResponse.ok) throw new Error(applyBody.error || "Unable to apply resume proposal");
+      if (documentType === "resume") {
+        const res = await fetch(`/api/resume/tailored/${jobId}`);
+        const data = await res.json();
+        if (data.exists) onResumeUpdated?.(data.content);
+        setResumeProposal(null);
+      } else {
+        setCoverLetterProposal(null);
+      }
     } finally {
       setApplying(false);
     }
@@ -193,19 +243,19 @@ export default function JobResumeChat({ jobId, onResumeUpdated, onMessagesChange
         <div ref={bottomRef} />
       </div>
 
-      {proposal && (
+      {resumeProposal && (
         <div className="mx-4 mb-2 p-3 bg-green-900/40 border border-green-800 rounded-lg">
           <p className="text-xs text-green-300 font-medium mb-2">Resume update proposed</p>
           <div className="flex gap-2">
             <button
-              onClick={handleApplyProposal}
+              onClick={() => handleApplyProposal("resume", resumeProposal)}
               disabled={applying}
               className="flex-1 px-3 py-1.5 bg-green-700 hover:bg-green-600 disabled:opacity-50 text-white rounded-lg text-xs font-medium transition-colors"
             >
               {applying ? "Applying..." : "Apply & Update Resume"}
             </button>
             <button
-              onClick={() => setProposal(null)}
+              onClick={() => setResumeProposal(null)}
               className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-400 rounded-lg text-xs transition-colors"
             >
               Discard
@@ -214,16 +264,28 @@ export default function JobResumeChat({ jobId, onResumeUpdated, onMessagesChange
         </div>
       )}
 
+      {coverLetterProposal && (
+        <div className="mx-4 mb-2 p-3 bg-violet-900/30 border border-violet-800 rounded-lg">
+          <p className="text-xs text-violet-300 font-medium mb-2">Cover-letter update proposed</p>
+          <div className="flex gap-2">
+            <button onClick={() => handleApplyProposal("cover_letter", coverLetterProposal)} disabled={applying} className="flex-1 px-3 py-1.5 bg-violet-700 hover:bg-violet-600 disabled:opacity-50 text-white rounded-lg text-xs font-medium transition-colors">
+              {applying ? "Applying..." : "Confirm & Update Cover Letter"}
+            </button>
+            <button onClick={() => setCoverLetterProposal(null)} className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-400 rounded-lg text-xs transition-colors">Discard</button>
+          </div>
+        </div>
+      )}
+
       <div className="border-t border-gray-800 px-3 pt-2 pb-1 flex items-center justify-between">
-        <label htmlFor={`chat-model-${jobId}`} className="text-xs text-gray-400">Model</label>
+        <label htmlFor={`chat-model-${jobId}`} className="text-xs text-gray-400">{provider === "openai" ? "OpenAI model" : provider === "codex" ? "Codex model" : "Cursor model"}</label>
         <select
           id={`chat-model-${jobId}`}
           value={model}
-          onChange={(e) => { const v = e.target.value as ModelId; setModel(v); try { localStorage.setItem(MODEL_STORAGE_KEY, v); } catch { /* quota */ } }}
-          disabled={sending}
+          onChange={(e) => { const value = e.target.value; setModel(value); try { localStorage.setItem(`chat-model-${provider}`, value); } catch { /* quota */ } }}
+          disabled={sending || settingsLoading}
           className="bg-gray-800 border border-gray-700 rounded px-2 py-0.5 text-xs text-gray-300 outline-none focus:border-indigo-500 transition-colors disabled:opacity-50 cursor-pointer"
         >
-          {MODELS.map((m) => (
+          {models.map((m) => (
             <option key={m.id} value={m.id}>{m.label}</option>
           ))}
         </select>
@@ -235,7 +297,7 @@ export default function JobResumeChat({ jobId, onResumeUpdated, onMessagesChange
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && handleSend()}
           disabled={sending}
-          placeholder="Ask about the resume or request changes..."
+          placeholder="Ask about the resume or cover letter..."
           className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs text-gray-100 placeholder-gray-600 outline-none focus:border-indigo-500 transition-colors disabled:opacity-50"
         />
         <button

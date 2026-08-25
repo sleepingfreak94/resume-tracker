@@ -111,7 +111,7 @@ export default function ResumePage() {
         <div>
           <h1 className="text-2xl font-bold text-white">Base Resume</h1>
           <p className="text-gray-400 mt-1 text-sm">
-            Upload or paste your base resume in Markdown format. The Cursor AI agent will tailor it for each job.
+            Upload or paste your base resume in Markdown format. Your selected AI provider will tailor it for each job.
           </p>
         </div>
         <div className="flex items-center gap-3">

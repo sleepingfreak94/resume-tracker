@@ -2,7 +2,9 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import ReminderBanner from "@/components/ReminderBanner";
+import LinkedInRunPanel from "@/components/LinkedInRunPanel";
 import ATSScoreBadge from "@/components/ATSScoreBadge";
 import StatusBadge from "@/components/StatusBadge";
 import { CLOSED_STATUSES, PIPELINE_STATUSES, type JobStatus } from "@/lib/job-status";
@@ -55,9 +57,11 @@ function companyInitial(company: string) {
 }
 
 export default function DashboardPage() {
+  const router = useRouter();
   const [jobs, setJobs] = useState<Job[]>([]);
   const [atsScores, setAtsScores] = useState<ATSScoreMap>({});
   const [staleJobs, setStaleJobs] = useState<StaleJob[]>([]);
+  const [pendingQuestions, setPendingQuestions] = useState(0);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -66,10 +70,12 @@ export default function DashboardPage() {
     Promise.all([
       fetch("/api/jobs").then((res) => res.json()),
       fetch("/api/reminders").then((res) => res.json()),
-    ]).then(async ([jobsData, remindersData]) => {
+      fetch("/api/application-library").then((res) => res.json()).catch(() => ({ pending: [] })),
+    ]).then(async ([jobsData, remindersData, libraryData]) => {
       if (ignore) return;
       setJobs(jobsData);
       setStaleJobs(Array.isArray(remindersData) ? remindersData : []);
+      setPendingQuestions(Array.isArray(libraryData.pending) ? libraryData.pending.length : 0);
       setLoading(false);
 
       const scored = (jobsData as Job[]).filter((job) => job.tailored_resume_path);
@@ -167,6 +173,7 @@ export default function DashboardPage() {
               Add a new job <span aria-hidden="true">↗</span>
             </Link>
             <Link href="/jobs" className="secondary-action">Review all jobs</Link>
+            <Link href="/answers" className="secondary-action">Application answers</Link>
           </div>
         </div>
 
@@ -193,8 +200,21 @@ export default function DashboardPage() {
 
       <ReminderBanner
         staleJobs={staleJobs}
-        onSelectJob={(jobId) => { window.location.href = `/jobs/${jobId}`; }}
+        onSelectJob={(jobId) => router.push(`/jobs/${jobId}`)}
       />
+
+      <LinkedInRunPanel />
+
+      {pendingQuestions > 0 && (
+        <section className="dashboard-panel flex flex-col gap-4 border-amber-300/15 bg-amber-300/[0.035] sm:flex-row sm:items-center sm:justify-between" aria-label="Application questions awaiting review">
+          <div>
+            <p className="panel-kicker text-amber-300">Autofill needs your input</p>
+            <h2 className="mt-1 text-lg font-semibold text-white">{pendingQuestions} application question{pendingQuestions === 1 ? "" : "s"} waiting for an answer</h2>
+            <p className="mt-1 text-sm text-gray-500">Answer each one once and equivalent wording will be filled automatically next time.</p>
+          </div>
+          <Link href="/answers" className="shrink-0 rounded-xl bg-amber-300 px-4 py-2.5 text-sm font-bold text-[#111318]">Review questions</Link>
+        </section>
+      )}
 
       <section className="metrics-grid" aria-label="Application performance">
         {metricCards.map((metric) => (

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { Agent, CursorAgentError } from "@cursor/sdk";
+import { AIProviderError, generateAIText } from "@/lib/ai-provider";
+import { aiProviderName } from "@/lib/ai-settings";
 
 export async function POST(req: NextRequest) {
   try {
@@ -9,14 +10,6 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(
         { error: "text must be between 20 and 100,000 characters" },
         { status: 400 }
-      );
-    }
-
-    const apiKey = process.env.CURSOR_API_KEY;
-    if (!apiKey) {
-      return NextResponse.json(
-        { error: "CURSOR_API_KEY is not configured on the server" },
-        { status: 500 }
       );
     }
 
@@ -45,19 +38,28 @@ Job posting text:
 ${text.slice(0, 8000)}
 ---`;
 
-    const result = await Agent.prompt(prompt, {
-      apiKey,
-      model: { id: "composer-2.5" },
+    const result = await generateAIText({
+      workload: "routine",
+      prompt,
+      maxOutputTokens: 12_000,
+      jsonSchema: {
+        name: "job_posting",
+        schema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            title: { type: "string" },
+            company: { type: "string" },
+            description: { type: "string" },
+            location: { type: ["string", "null"] },
+            requirements: { type: "array", items: { type: "string" } },
+          },
+          required: ["title", "company", "description", "location", "requirements"],
+        },
+      },
+      signal: req.signal,
     });
-
-    if (result.status === "error") {
-      return NextResponse.json(
-        { error: "AI extraction failed. Please fill in the fields manually." },
-        { status: 502 }
-      );
-    }
-
-    const raw = result.result?.trim() ?? "";
+    const raw = result.text.trim();
 
     // Parse the JSON the agent returned — it may be wrapped in backticks
     let parsed: Record<string, unknown>;
@@ -83,9 +85,9 @@ ${text.slice(0, 8000)}
       { status: 200 }
     );
   } catch (err) {
-    if (err instanceof CursorAgentError) {
+    if (err instanceof AIProviderError) {
       return NextResponse.json(
-        { error: `AI service error: ${err.message}` },
+        { error: `${aiProviderName(err.provider)} service error: ${err.message}` },
         { status: 502 }
       );
     }
