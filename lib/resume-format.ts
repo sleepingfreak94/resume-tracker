@@ -2,14 +2,34 @@ export const JOB_LINE_RE = /^\*\*(.+?)\*\*\s*\|\s*(.+)$/;
 
 export type JobEntry = { company: string; title: string; dateRange: string };
 
+export type ResumeFilenameProfile = {
+  first_name?: string | null;
+  last_name?: string | null;
+};
+
 export function parseJobLine(line: string): { title: string; dateRange: string } | null {
   const m = JOB_LINE_RE.exec(line.trim());
   return m ? { title: m[1].trim(), dateRange: m[2].trim() } : null;
 }
 
-export function toDriveFilename(company: string): string {
-  const clean = company.replace(/[/\\:*?"<>|]/g, "").trim().replace(/\s+/g, " ");
-  return clean ? `${clean} Resume.docx` : "resume.docx";
+function compactFilenamePart(value: unknown): string {
+  return String(value ?? "")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]/gi, "")
+    .slice(0, 100);
+}
+
+export function toResumeFilename(profile: ResumeFilenameProfile | null | undefined, format = "docx"): string {
+  const name = `${compactFilenamePart(profile?.first_name)}${compactFilenamePart(profile?.last_name)}`;
+  const extension = format === "pdf" ? "pdf" : "docx";
+  return `${name ? `${name}-Resume` : "Resume"}.${extension}`;
+}
+
+export function toDriveFilename(profile: ResumeFilenameProfile | null | undefined, company?: string | null): string {
+  const base = toResumeFilename(profile).replace(/\.docx$/i, "");
+  const companySuffix = compactFilenamePart(company);
+  return `${base}${companySuffix ? `-${companySuffix}` : ""}.docx`;
 }
 
 export type ResumeSegment =

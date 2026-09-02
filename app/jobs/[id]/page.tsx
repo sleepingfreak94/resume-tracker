@@ -9,7 +9,7 @@ import ATSScoreBadge from "@/components/ATSScoreBadge";
 import ActivityTimeline from "@/components/ActivityTimeline";
 import StatusBadge from "@/components/StatusBadge";
 import JobResumeChat, { getChatMessageCount } from "@/components/JobResumeChat";
-import { toDriveFilename } from "@/lib/resume-format";
+import { getLocalResumeFilename } from "@/lib/resume-filename-client";
 import {
   STATUS_CONFIG,
   USER_SELECTABLE_STATUSES,
@@ -226,17 +226,18 @@ export default function JobDetailsPage() {
     if (!resumeContent) return;
     setConverting(true);
     try {
+      const filename = await getLocalResumeFilename();
       const res = await fetch("/api/resume/docx", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content: resumeContent, filename: `resume-job-${id}.docx` }),
+        body: JSON.stringify({ content: resumeContent, filename }),
       });
       if (!res.ok) throw new Error((await res.json()).error);
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `resume-job-${id}.docx`;
+      a.download = filename;
       a.click();
       URL.revokeObjectURL(url);
     } finally {
@@ -352,11 +353,15 @@ export default function JobDetailsPage() {
               <button
                 onClick={() => {
                   const url = new URL(job.job_link!);
-                  url.hash = `rt_job_id=${job.id}`;
+                  const handoff = new URLSearchParams({
+                    rt_job_id: String(job.id),
+                    "resume-tracker-port": window.location.port || "3000",
+                  });
+                  url.hash = handoff.toString();
                   window.open(url.toString(), "_blank");
                 }}
                 className="flex items-center gap-1.5 px-3 py-2 bg-emerald-700 hover:bg-emerald-600 text-white rounded-lg text-sm font-medium transition-colors"
-                title="Opens the application page — click Auto Apply in the extension"
+                title="Opens the application page and arms automatic tailored-resume upload"
               >
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
@@ -388,7 +393,7 @@ export default function JobDetailsPage() {
                 </button>
                 <SaveToDriveButton
                   content={resumeContent}
-                  filename={toDriveFilename(job.company)}
+                  company={job.company}
                   storageKey={`job-${id}`}
                   returnTo={`/jobs/${id}`}
                 />

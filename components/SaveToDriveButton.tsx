@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 
 type Props = {
   content: string;
-  filename: string;
+  company?: string | null;
   storageKey: string;
   returnTo: string;
   className?: string;
@@ -15,7 +15,7 @@ type Props = {
 
 export default function SaveToDriveButton({
   content,
-  filename,
+  company,
   storageKey,
   returnTo,
   className = "",
@@ -48,7 +48,7 @@ export default function SaveToDriveButton({
       const res = await fetch("/api/resume/drive", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content, filename, storageKey }),
+        body: JSON.stringify({ content, company, storageKey }),
       });
       const data = await res.json();
 

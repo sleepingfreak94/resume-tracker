@@ -38,6 +38,8 @@ npm run dev
 
 Open [http://localhost:3000](http://localhost:3000).
 
+If port 3000 is already in use, start on another loopback port, for example `npm run dev -- --port 3002`, and open the matching URL. LinkedIn runs pass this port to the extension automatically; the popup also shows whether its saved port is connected.
+
 Use **Settings** to choose the provider. For ChatGPT-subscription Codex, run `npm run codex:login`, complete the browser sign-in, then refresh the status card. Codex routes Sol/high to resumes and cover letters, Terra/high to document chat, and Luna/high to parsing, ATS analysis, and application answers. OpenAI uses the corresponding workload controls with `OPENAI_API_KEY`; Cursor uses `CURSOR_API_KEY`. The app never falls back between providers.
 
 API keys remain server-only and are never returned by the Settings API or included in backups. Resume-chat transcripts stay in browser local storage and are replayed with each request; OpenAI response storage is disabled. For Google Drive uploads, also configure `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and `GOOGLE_REDIRECT_URI`.
@@ -59,34 +61,43 @@ npm run codex:status # Show the active Codex authentication method
 
 ## LinkedIn auto-apply runs
 
-The dashboard exposes a **LinkedIn auto-apply** panel. Enter a search keyword (e.g. "QA Automation Engineer"), an optional location, a job cap (default 15), and whether to auto-submit Easy Apply applications. Click **Start run** — this saves the run to the database and opens the matching LinkedIn job search in a new tab. The Chrome extension detects the active run and starts crawling automatically.
+The dashboard exposes a **LinkedIn auto-apply** panel. Enter a search keyword (e.g. "QA Automation Engineer"), an optional location, and a job cap (default 15). Click **Start run** — this saves the run to the database and opens the matching LinkedIn job search in a new tab. The Chrome extension detects the active run and starts crawling automatically.
+
+Before starting, sign in to LinkedIn in the same Chrome or Brave profile where the unpacked extension is installed. The dashboard shows the app port and extension heartbeat. A run that never receives a heartbeat reports that the extension is disconnected instead of silently appearing active.
 
 For each result card the run:
 1. Extracts the job details using structured data, focused DOM, and guest APIs; if those are incomplete, the selected routine provider parses focused text.
 2. Imports the job into the tracker (de-duplicated by URL).
 3. Tailors the resume using the AI provider selected in Settings (sequential, typically 30–90 s per job).
-4. **Easy Apply jobs**: opens the modal only after the tailored artifact is verified, requires successful resume conversion/upload when an upload control exists, generates a cover letter only for a required cover-letter field, answers evidence-backed questions, and either submits automatically or pauses for review depending on the **Auto-submit** toggle.
+4. **Easy Apply jobs**: opens the modal only after the tailored artifact is verified, requires successful resume conversion/upload when an upload control exists, generates a cover letter only for a required cover-letter field, answers evidence-backed questions, and always pauses for final review. The extension never clicks the final Submit control.
 5. **External-portal jobs** (plain "Apply" button): prepares a tailored resume and flags the job as "Apply manually" only after preparation succeeds.
 
 A progress panel appears in the LinkedIn tab showing current status and a **Stop** button. Once the run completes (or is stopped), the dashboard shows a summary of applied, flagged, and failed jobs.
 
 **Known limits**
 
-- The Chrome window and the LinkedIn search tab must remain open for the run's duration. If the machine sleeps or the tab is closed, the run pauses; re-opening the same search URL (visible in the dashboard) resumes it automatically because the active run is stored in SQLite.
+- The Chrome or Brave window and the LinkedIn search tab must remain open for the run's duration. If the machine sleeps or the tab is closed, the run pauses; re-opening the same search URL (visible in the dashboard) resumes it automatically because the active run is stored in SQLite.
+- Each job is checkpointed before Easy Apply opens and again before Submit. If the browser closes during an application, Resume Tracker stops that job as **needs manual review** and never reopens or submits it automatically. Runs interrupted safely between jobs can be reopened from the dashboard.
 - LinkedIn periodically changes its markup. Job extraction uses selector-learning fallbacks and a guest-API path to stay resilient, but the Easy Apply modal driver may need updating after major LinkedIn UI redesigns. Failures are logged to the run note rather than silently misfiring.
 - The resume tailor queue runs in-process. A server restart mid-run leaves jobs in the `tailoring` status; re-triggering the run from the dashboard will resume where it left off (already-tailored jobs are skipped).
 - Human-like 3–8 second gaps are added between jobs. Running the cap at the default 15 jobs takes roughly 20–30 minutes including tailoring.
 
-## Chrome extension
+## Chrome or Brave extension
 
 1. Start the app on port 3000.
-2. Open `chrome://extensions` and enable Developer mode.
+2. Open `chrome://extensions` in Chrome or `brave://extensions` in Brave and enable Developer mode.
 3. Choose **Load unpacked** and select the `extension` directory.
 4. Open the extension popup from a supported job page.
+
+Version 3.6.1 declares Chrome's mandatory **debugger** permission and uses one chooser-first CDP attempt for both popup and dashboard flows. LinkedIn's current Easy Apply résumé dialog is exposed to Chrome's accessibility tree but not to ordinary content-script DOM queries, so the background worker locates the visible **Upload resume** accessibility node directly. CDP intercepts that control's native chooser, assigns the generated local file to the chooser's actual input node, and validates the generated filename plus selected-card state through the same accessibility tree. If LinkedIn renders the DOCX card as **Select resume** after upload, the controller clicks that exact card once and requires it to change to **Deselect resume**; it never uploads the file again to repair selection. No `DataTransfer`, synthetic file assignment, or synthetic upload event is used. Chrome may show the debugger access warning when the unpacked extension is loaded or reloaded. Automated files are retained under `Downloads/ResumeTracker/Uploads/<job-id>/` for recovery. Every stage has a deadline and is recorded in Chrome session storage. If debugger access is denied, the control cannot be resolved, CDP rejects or times out, or LinkedIn does not show the generated filename while clearing its required-error state, the run stops as **needs manual review**. Ambiguous and post-selection attempts cannot be cleared or uploaded a second time; only a confirmed pre-upload failure can be reset explicitly from the popup. Final application submission remains manual.
+
+For a custom app port, enter it in **App port** in the popup and confirm that the status reads **Connected**. A newly started LinkedIn run also carries its originating app port in the search URL, so the background worker can correct an older saved value automatically.
 
 The extension can import job details, match tracked jobs, download tailored resumes, autofill supported application forms, and use the selected server-side AI provider to answer open application questions from the saved profile, resume, tracked job, and confirmed answer library. Differently worded questions are grouped by normalized meaning and aliases; unanswered questions appear under **Answers** in the dashboard.
 
 The **Answers** page also controls multi-step automation: enable automatic Next/Continue, choose whether auto-apply attaches DOCX (the default) or PDF, set a 0–60 second delay, pause on unknown questions, and turn final review on or off. Every countdown has a visible pause button. Final review defaults to on. Certification, consent, signature, background-check, validation, and CAPTCHA gates always pause for personal confirmation. The extension never receives either provider API key; AI requests remain in the localhost server. Its localhost port can be changed in the popup.
+
+For a first smoke test, use a one-job cap. Confirm that the tailored document is prepared and the LinkedIn modal reaches final review, then close it without submitting.
 
 For stricter extension access, copy the extension ID from `chrome://extensions` into `RESUME_TRACKER_EXTENSION_ID` in `.env.local`. Without it, any installed Chrome extension may call the local API; regular websites and non-loopback hosts are still rejected.
 

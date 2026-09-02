@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import dynamic from "next/dynamic";
+import { getLocalResumeFilename } from "@/lib/resume-filename-client";
 
 const MarkdownPreview = dynamic(() => import("@/components/MarkdownPreview"), { ssr: false });
 const SaveToDriveButton = dynamic(() => import("@/components/SaveToDriveButton"), { ssr: false });
@@ -35,17 +36,18 @@ export default function ResumePage() {
     if (!content.trim()) return;
     setConverting(true);
     try {
+      const filename = await getLocalResumeFilename();
       const res = await fetch("/api/resume/docx", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content, filename: "base-resume.docx" }),
+        body: JSON.stringify({ content, filename }),
       });
       if (!res.ok) throw new Error((await res.json()).error);
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = "base-resume.docx";
+      a.download = filename;
       a.click();
       URL.revokeObjectURL(url);
     } catch (err) {
@@ -130,7 +132,6 @@ export default function ResumePage() {
           </button>
           <SaveToDriveButton
             content={content}
-            filename="base-resume.docx"
             storageKey="base"
             returnTo="/resume"
             size="md"

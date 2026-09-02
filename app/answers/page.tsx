@@ -306,7 +306,10 @@ export default function ApplicationAnswersPage() {
           </div>
           <div className="space-y-3">
             <Toggle checked={data.settings.auto_continue} onChange={(value) => setData((current) => ({ ...current, settings: { ...current.settings, auto_continue: value } }))} label="Automatically click Next" description="Continue through completed application steps after the countdown." />
-            <Toggle checked={data.settings.final_review} onChange={(value) => setData((current) => ({ ...current, settings: { ...current.settings, final_review: value } }))} label="Pause for final review" description="When off, the extension may submit after the countdown if every safety check passes." />
+            <div className="rounded-2xl border border-[#c7f36b]/20 bg-[#c7f36b]/[0.04] p-4">
+              <p className="text-sm font-semibold text-white">Final submission is manual</p>
+              <p className="mt-1 text-xs leading-relaxed text-gray-500">The extension can continue completed steps, but it always stops before the final Submit control.</p>
+            </div>
             <Toggle checked={data.settings.pause_on_unknown} onChange={(value) => setData((current) => ({ ...current, settings: { ...current.settings, pause_on_unknown: value } }))} label="Pause on unknown questions" description="Stop when a required or uncertain answer needs your decision." />
             <fieldset className="rounded-2xl border border-white/[0.07] bg-white/[0.025] p-4">
               <legend className="px-0 text-sm font-semibold text-white">Auto-apply resume format</legend>

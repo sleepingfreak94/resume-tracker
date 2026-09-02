@@ -3,12 +3,14 @@
 import { useState, useEffect, useRef } from "react";
 import Link from "next/link";
 import type { LinkedInRun, LinkedInRunItem } from "@/lib/db";
-import type { RunSummary } from "@/lib/linkedin-run";
+import type { LinkedInRunRecovery, RunSummary } from "@/lib/linkedin-run";
 
 interface RunState {
   run: LinkedInRun;
   items: LinkedInRunItem[];
   summary: RunSummary;
+  searchUrl: string;
+  recovery: LinkedInRunRecovery;
 }
 
 const STATUS_LABEL: Record<string, string> = {
@@ -22,11 +24,18 @@ const STATUS_LABEL: Record<string, string> = {
 
 const ACTIVE_STATUSES = new Set(["queued", "running", "tailoring"]);
 
+const RECOVERY_LABEL: Record<LinkedInRunRecovery["state"], string> = {
+  launching: "Waiting for extension…",
+  connected: "Running",
+  waiting_user: "Waiting for you",
+  interrupted: "Interrupted",
+  complete: "Complete",
+};
+
 export default function LinkedInRunPanel() {
   const [keywords, setKeywords] = useState("");
   const [location, setLocation] = useState("");
   const [maxJobs, setMaxJobs] = useState(15);
-  const [autoSubmit, setAutoSubmit] = useState(false);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [active, setActive] = useState<RunState | null>(null);
@@ -37,7 +46,10 @@ export default function LinkedInRunPanel() {
     fetch("/api/linkedin-run/active")
       .then((r) => r.json())
       .then((data) => {
-        if (data?.run) startPolling(data.run.id);
+        if (data?.run) {
+          setActive(data as RunState);
+          startPolling(data.run.id);
+        }
       })
       .catch(() => {});
   }, []);
@@ -70,11 +82,23 @@ export default function LinkedInRunPanel() {
       const res = await fetch("/api/linkedin-run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ keywords, location: location || undefined, max_jobs: maxJobs, auto_submit: autoSubmit }),
+        body: JSON.stringify({
+          keywords,
+          location: location || undefined,
+          max_jobs: maxJobs,
+          auto_submit: false,
+          app_port: Number(window.location.port || "3000"),
+        }),
       });
       const data = await res.json();
       if (!res.ok) { setError(data.error ?? "Failed to start run"); return; }
-      setActive({ run: data.run, items: [], summary: { total: 0, applied: 0, needs_manual: 0, failed: 0, skipped: 0 } });
+      setActive({
+        run: data.run,
+        items: [],
+        summary: { total: 0, processing: 0, applied: 0, needs_manual: 0, failed: 0, skipped: 0 },
+        searchUrl: data.searchUrl,
+        recovery: { state: "launching", canResume: false, reason: null },
+      });
       startPolling(data.run.id);
       window.open(data.searchUrl, "_blank", "noopener");
     } catch (err) {
@@ -86,17 +110,29 @@ export default function LinkedInRunPanel() {
 
   async function handleStop() {
     if (!active) return;
+    if (active.recovery.state === "interrupted" && !window.confirm(
+      "Stop this LinkedIn run? Any open LinkedIn application will be left for you to verify manually."
+    )) return;
     await fetch(`/api/linkedin-run/${active.run.id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ status: "stopped" }),
     });
-    setActive((prev) => prev ? { ...prev, run: { ...prev.run, status: "stopped" } } : null);
+    setActive((prev) => prev ? {
+      ...prev,
+      run: { ...prev.run, status: "stopped" },
+      recovery: { state: "complete", canResume: false, reason: null },
+    } : null);
     if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
   }
 
   const isActive = active && ACTIVE_STATUSES.has(active.run.status);
   const needsManual = active?.items.filter((i) => i.outcome === "needs_manual") ?? [];
+  const activeLabel = active
+    ? active.recovery.state === "complete"
+      ? STATUS_LABEL[active.run.status] ?? active.run.status
+      : RECOVERY_LABEL[active.recovery.state]
+    : "";
 
   return (
     <section className="dashboard-panel" aria-labelledby="linkedin-run-heading" style={{ borderColor: "rgba(99,202,183,0.15)", background: "rgba(99,202,183,0.03)" }}>
@@ -158,15 +194,7 @@ export default function LinkedInRunPanel() {
                 className="w-20 rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-white focus:border-[#63cab7]/40 focus:outline-none"
               />
             </div>
-            <label className="flex cursor-pointer items-center gap-2 pt-5">
-              <input
-                type="checkbox"
-                checked={autoSubmit}
-                onChange={(e) => setAutoSubmit(e.target.checked)}
-                className="h-4 w-4 rounded border-white/20 accent-[#63cab7]"
-              />
-              <span className="text-sm text-gray-300">Auto-submit Easy Apply</span>
-            </label>
+            <p className="pt-5 text-sm text-gray-400">Final submission is always manual.</p>
           </div>
 
           {error && <p className="text-sm text-red-400">{error}</p>}
@@ -197,7 +225,7 @@ export default function LinkedInRunPanel() {
                   <span className="relative inline-flex h-2 w-2 rounded-full bg-[#63cab7]" />
                 </span>
               )}
-              <span className="text-sm font-medium text-white">{STATUS_LABEL[active.run.status] ?? active.run.status}</span>
+              <span className="text-sm font-medium text-white">{activeLabel}</span>
             </div>
             {isActive && (
               <button onClick={handleStop} className="text-xs text-red-400 hover:text-red-300">Stop</button>
@@ -210,8 +238,41 @@ export default function LinkedInRunPanel() {
             {" · "}cap {active.run.max_jobs}
           </p>
 
+          <div className="flex flex-wrap gap-2 text-[11px]">
+            <span className="rounded-full border border-white/10 bg-white/[0.03] px-2.5 py-1 text-gray-400">
+              App port <strong className="text-gray-200">{active.run.app_port}</strong>
+            </span>
+            <span className="rounded-full border border-[#63cab7]/20 bg-[#63cab7]/[0.06] px-2.5 py-1 text-[#63cab7]">
+              Final submit <strong>MANUAL</strong>
+            </span>
+            <span className="rounded-full border border-white/10 bg-white/[0.03] px-2.5 py-1 text-gray-500">
+              {active.run.heartbeat_at ? `Extension seen ${new Date(`${active.run.heartbeat_at.replace(" ", "T")}Z`).toLocaleTimeString()}` : "No extension heartbeat"}
+            </span>
+          </div>
+
+          {active.recovery.state === "interrupted" && (
+            <div className="rounded-xl border border-amber-300/20 bg-amber-300/[0.06] p-3 text-xs text-amber-200">
+              <p>{active.recovery.reason}</p>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {active.recovery.canResume && (
+                  <button
+                    type="button"
+                    onClick={() => window.open(active.searchUrl, "_blank", "noopener")}
+                    className="rounded-lg bg-amber-300 px-3 py-1.5 font-bold text-[#111318]"
+                  >
+                    Reopen LinkedIn search
+                  </button>
+                )}
+                <button type="button" onClick={handleStop} className="rounded-lg border border-red-400/30 px-3 py-1.5 font-semibold text-red-300">
+                  Stop interrupted run
+                </button>
+              </div>
+            </div>
+          )}
+
           {active.summary.total > 0 && (
             <div className="flex gap-4 text-xs text-gray-400">
+              {active.summary.processing > 0 && <span><strong className="text-amber-300">{active.summary.processing}</strong> in progress</span>}
               <span><strong className="text-white">{active.summary.applied}</strong> applied</span>
               <span><strong className="text-[#63cab7]">{active.summary.needs_manual}</strong> needs manual</span>
               {active.summary.failed > 0 && <span><strong className="text-red-400">{active.summary.failed}</strong> failed</span>}

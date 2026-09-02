@@ -70,3 +70,6 @@ next-env.d.ts
 /.swarm/
 /.mcp.json
 /ruvector.db
+/agentdb.rvf
+/agentdb.rvf.lock
+/excalidraw.log

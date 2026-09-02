@@ -1,6 +1,87 @@
-// Background service worker — handles DOCX downloads and cross-script messaging
+// Background service worker — handles document downloads, CDP uploads, and cross-script messaging
+
+importScripts("resume-cdp.js");
+
+const resumeCdpController = ResumeTrackerCdp.createResumeCdpController({
+  chromeApi: chrome,
+  fetchImpl: fetch,
+  toDataUrl: blobToDataUrl,
+  onStage: (status) => chrome.runtime.sendMessage({
+    type: "RESUME_UPLOAD_STAGE",
+    status,
+  }).catch(() => {}),
+  validateAcceptance: ({ tabId, frameId, targetToken, filename, method }) => chrome.tabs.sendMessage(tabId, {
+    type: "VALIDATE_RESUME_UPLOAD_ACCEPTANCE",
+    targetToken,
+    filename,
+    method,
+  }, { frameId }),
+});
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg.type === "UPLOAD_RESUME_VIA_CDP") {
+    resumeCdpController.upload(msg, sender).then(sendResponse).catch((error) => {
+      sendResponse({
+        ok: false,
+        filename: null,
+        method: "chooser",
+        cdpStatus: "failed",
+        stage: "background_worker",
+        failure: {
+          reason: "cdp_rejected",
+          message: error instanceof Error ? error.message : String(error),
+          stage: "background_worker",
+        },
+      });
+    });
+    return true;
+  }
+
+  if (msg.type === "GET_RESUME_UPLOAD_STATUS") {
+    const tabId = Number(msg.tabId || sender.tab?.id);
+    resumeCdpController.getLatestStatus({ tabId })
+      .then((status) => sendResponse({ ok: true, status }))
+      .catch((error) => sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+    return true;
+  }
+
+  if (msg.type === "CLEAR_RESUME_UPLOAD_ATTEMPT") {
+    const tabId = Number(msg.tabId || sender.tab?.id);
+    resumeCdpController.clearLatestStatus({ tabId })
+      .then(sendResponse)
+      .catch((error) => sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+    return true;
+  }
+
+  if (msg.type === "DASHBOARD_AUTOFILL_HANDOFF") {
+    const tabId = sender.tab?.id;
+    const port = Number(msg.port);
+    const jobId = Number(msg.jobId);
+    if (!tabId || !Number.isInteger(port) || port < 1 || port > 65535 || !Number.isInteger(jobId) || jobId <= 0) {
+      sendResponse({ ok: false, error: "Invalid dashboard autofill handoff" });
+      return;
+    }
+    const session = { mode: "dashboard-resume-watch", port, jobId, startedAt: Date.now() };
+    chrome.storage.session.set({ [`autoFillSession_${tabId}`]: session })
+      .then(async () => {
+        await armDashboardResumeUpload(tabId, session);
+        sendResponse({ ok: true });
+      })
+      .catch((err) => sendResponse({ ok: false, error: err.message }));
+    return true;
+  }
+
+  if (msg.type === "CLEAR_DASHBOARD_AUTOFILL_WATCH") {
+    const tabId = sender.tab?.id;
+    if (!tabId) return;
+    const key = `autoFillSession_${tabId}`;
+    chrome.storage.session.get(key).then((stored) => {
+      if (stored[key]?.mode === "dashboard-resume-watch") return chrome.storage.session.remove(key);
+      return undefined;
+    }).then(() => sendResponse({ ok: true })).catch((err) => sendResponse({ ok: false, error: err.message }));
+    return true;
+  }
+
   if (msg.type === "SET_AUTOFILL_SESSION") {
     const tabId = sender.tab?.id;
     if (!tabId) return;
@@ -76,8 +157,73 @@ const ALLOWED_LOCAL_API = [
 const autoFillContinuationLocks = new Set();
 const linkedInRunLocks = new Set();
 
+async function armDashboardResumeUpload(tabId, session) {
+  await chrome.scripting.executeScript({ target: { tabId }, files: ["content-autofill.js"] });
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    func: (port, jobId) => window.__rtAutoFill?.armResumeUpload(port, jobId),
+    args: [session.port, session.jobId],
+  });
+}
+
+function linkedInAppPortFromUrl(value) {
+  try {
+    const url = new URL(value);
+    if (!/(^|\.)linkedin\.com$/i.test(url.hostname)) return null;
+    const port = Number(new URLSearchParams(url.hash.replace(/^#/, "")).get("resume-tracker-port"));
+    return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : null;
+  } catch {
+    return null;
+  }
+}
+
+function linkedInRunIdFromUrl(value) {
+  try {
+    const url = new URL(value);
+    if (!/(^|\.)linkedin\.com$/i.test(url.hostname)) return null;
+    const runId = Number(new URLSearchParams(url.hash.replace(/^#/, "")).get("resume-tracker-run"));
+    return Number.isInteger(runId) && runId > 0 ? runId : null;
+  } catch {
+    return null;
+  }
+}
+
+function linkedInRunHandoffFromUrl(value) {
+  const port = linkedInAppPortFromUrl(value);
+  const runId = linkedInRunIdFromUrl(value);
+  return port && runId ? { port, runId } : null;
+}
+
+async function resolveLinkedInRunHandoff(tabId, url) {
+  const handoff = linkedInRunHandoffFromUrl(url);
+  const key = `linkedInRunHandoff_${tabId}`;
+  if (handoff) {
+    await chrome.storage.local.set({ savedPort: String(handoff.port) });
+    await chrome.storage.session.set({ [key]: handoff });
+    return handoff;
+  }
+  const stored = await chrome.storage.session.get(key);
+  const saved = stored[key];
+  if (!saved) return null;
+  const port = Number(saved.port);
+  const runId = Number(saved.runId);
+  return Number.isInteger(port) && port >= 1 && port <= 65535 && Number.isInteger(runId) && runId > 0
+    ? { port, runId }
+    : null;
+}
+
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (!changeInfo.url && changeInfo.status !== "complete") return;
+
+  // Capture the port handoff as soon as the search URL appears. LinkedIn may
+  // later rewrite unknown fragments before the page reaches "complete".
+  if (changeInfo.url && /linkedin\.com\/jobs\/search/i.test(tab.url || changeInfo.url)) {
+    const handoff = linkedInRunHandoffFromUrl(tab.url || changeInfo.url);
+    if (handoff) {
+      chrome.storage.local.set({ savedPort: String(handoff.port) }).catch(() => {});
+      chrome.storage.session.set({ [`linkedInRunHandoff_${tabId}`]: handoff }).catch(() => {});
+    }
+  }
 
   // ── LinkedIn auto-apply run injection ────────────────────────────────────
   // When a jobs/search page finishes loading and there's an active run, inject
@@ -91,12 +237,20 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     linkedInRunLocks.add(tabId);
     setTimeout(async () => {
       try {
-        const { savedPort } = await chrome.storage.local.get("savedPort");
-        const port = parseInt(savedPort || "3000", 10);
-        const res = await fetch(`http://localhost:${port}/api/linkedin-run/active`);
+        const handoff = await resolveLinkedInRunHandoff(tabId, tab.url);
+        if (!handoff) return;
+        const res = await fetch(`http://localhost:${handoff.port}/api/linkedin-run/active`);
         if (!res.ok) return;
         const data = await res.json();
         if (!data?.run) return;
+        if (Number(data.run.id) !== handoff.runId) {
+          console.warn("[ResumeTracker] Ignoring a LinkedIn search tab for a different run");
+          return;
+        }
+        if (data.recovery?.state === "interrupted" && data.recovery?.canResume !== true) {
+          console.warn("[ResumeTracker] Refusing to resume an interrupted in-flight LinkedIn application");
+          return;
+        }
         // Inject in order: content.js (extractor) → content-autofill.js (filler) → crawler
         await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
         await chrome.scripting.executeScript({ target: { tabId }, files: ["content-autofill.js"] });
@@ -119,12 +273,21 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
       const stored = await chrome.storage.session.get(key);
       const session = stored[key];
       if (!session) return;
-      if (Date.now() - Number(session.startedAt || 0) > 5 * 60 * 1000) {
+      const sessionLifetime = session.mode === "dashboard-resume-watch" ? 10 * 60 * 1000 : 5 * 60 * 1000;
+      if (Date.now() - Number(session.startedAt || 0) > sessionLifetime) {
         await chrome.storage.session.remove(key);
         return;
       }
       if (!tab.url || /chrome:\/\/|chrome-extension:\/\//.test(tab.url)) {
         await chrome.storage.session.remove(key);
+        return;
+      }
+      if (session.mode === "dashboard-resume-watch") {
+        if (!/linkedin\.com\/jobs\//i.test(tab.url)) {
+          await chrome.storage.session.remove(key);
+          return;
+        }
+        await armDashboardResumeUpload(tabId, session);
         return;
       }
       await chrome.scripting.executeScript({ target: { tabId }, files: ["content-autofill.js"] });
@@ -190,9 +353,17 @@ async function handleResumeDownload({ port, jobId, filename }) {
     }
   }
 
+  let profile = null;
+  try {
+    const profileRes = await fetch(`http://localhost:${port}/api/profile`);
+    if (profileRes.ok) profile = await profileRes.json();
+  } catch {
+    // The document can still be downloaded with the safe fallback name.
+  }
+
   // Fetch the resume markdown content
   let resumeContent = null;
-  let resolvedFilename = filename || `resume.${format}`;
+  const resolvedFilename = ResumeTrackerCdp.profileResumeFilename(profile, format);
 
   if (jobId) {
     // Try to get tailored resume for this job
@@ -201,7 +372,6 @@ async function handleResumeDownload({ port, jobId, filename }) {
       const data = await tailoredRes.json();
       if (data.content) {
         resumeContent = data.content;
-        resolvedFilename = `resume-job-${jobId}.${format}`;
       }
     }
   }

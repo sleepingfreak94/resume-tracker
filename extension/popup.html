@@ -342,6 +342,7 @@
       <div class="port-row" style="margin-top:14px">
         <label for="port">App port:</label>
         <input id="port" type="number" value="3000" min="1" max="65535" />
+        <span id="port-status" style="font-size:11px;color:#64748b">Checking…</span>
       </div>
 
       <button class="btn btn-primary" id="send-btn">Add to Resume Tracker</button>
@@ -365,6 +366,7 @@
     <button class="btn btn-primary" id="fill-btn">Start Smart Auto-Fill</button>
     <button class="btn btn-secondary" id="fill-fields-btn">Fill Profile Fields Only</button>
     <button class="btn btn-success" id="download-resume-btn">Download Resume (DOCX)</button>
+    <button class="btn btn-secondary" id="clear-upload-pause-btn" style="display:none">Clear Safe Pre-Upload Pause</button>
     <button class="btn btn-secondary" id="mark-applied-btn" style="display:none">Mark as Applied</button>
     <button class="btn btn-secondary" id="open-profile-btn">Edit Profile in App</button>
     <button class="btn btn-secondary" id="open-answers-btn">Answers &amp; Automation Settings</button>

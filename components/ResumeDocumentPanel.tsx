@@ -2,6 +2,7 @@
 
 import dynamic from "next/dynamic";
 import { useEffect, useRef, useState } from "react";
+import { getLocalResumeFilename } from "@/lib/resume-filename-client";
 
 const MarkdownPreview = dynamic(() => import("@/components/MarkdownPreview"), { ssr: false });
 
@@ -88,11 +89,11 @@ export default function ResumeDocumentPanel() {
     if (!content.trim()) return;
     setGenerating(format);
     try {
-      const stem = filename.replace(/\.md$/i, "") || "base-resume";
+      const downloadFilename = await getLocalResumeFilename(format);
       const response = await fetch(`/api/resume/${format}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content, filename: `${stem}.${format}` }),
+        body: JSON.stringify({ content, filename: downloadFilename }),
       });
       if (!response.ok) {
         const body = await response.json();
@@ -102,7 +103,7 @@ export default function ResumeDocumentPanel() {
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
       anchor.href = url;
-      anchor.download = `${stem}.${format}`;
+      anchor.download = downloadFilename;
       document.body.appendChild(anchor);
       anchor.click();
       anchor.remove();

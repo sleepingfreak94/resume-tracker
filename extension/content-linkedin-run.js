@@ -21,11 +21,45 @@
     });
   }
 
+  function linkedInAppPortFromUrl(value) {
+    try {
+      const url = new URL(value);
+      if (!/(^|\.)linkedin\.com$/i.test(url.hostname)) return null;
+      const port = Number(new URLSearchParams(url.hash.replace(/^#/, "")).get("resume-tracker-port"));
+      return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function resolveRunPort() {
+    const handedOffPort = linkedInAppPortFromUrl(window.location.href);
+    if (handedOffPort) {
+      await chrome.storage.local.set({ savedPort: String(handedOffPort) });
+      return handedOffPort;
+    }
+    const { savedPort } = await chrome.storage.local.get("savedPort");
+    const storedPort = Number(savedPort || 3000);
+    return Number.isInteger(storedPort) && storedPort >= 1 && storedPort <= 65535 ? storedPort : 3000;
+  }
+
   // ── DOM helpers ──────────────────────────────────────────────────────────
 
   function wait(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
   function jitter(minMs, maxMs) { return wait(minMs + Math.random() * (maxMs - minMs)); }
+
+  function linkedInIsSignedIn() {
+    if (/\/(?:login|signup|authwall)(?:\/|$)/i.test(window.location.pathname)) return false;
+    if (document.querySelector("input[name='session_key'], input#session_key, form[action*='login'], form[action*='signup'], .authwall, [data-test-id*='authwall']")) return false;
+    return Boolean(document.querySelector([
+      "a[href^='/jobs']",
+      "a[href*='linkedin.com/jobs']",
+      "nav a[href*='/mynetwork']",
+      "nav a[href*='/messaging']",
+      "[data-test-global-nav-link='jobs']",
+    ].join(",")));
+  }
 
   async function waitFor(predicate, timeoutMs = 10_000, intervalMs = 300) {
     const deadline = Date.now() + timeoutMs;
@@ -46,6 +80,34 @@
 
   let progressPanel = null;
   let stopRequested = false;
+  let heartbeatTimer = null;
+
+  function isInactiveRunError(error) {
+    return /run is no longer active|run is not active/i.test(String(error?.message || error || ""));
+  }
+
+  async function startHeartbeat(port, runId) {
+    const beat = async () => {
+      try {
+        await callApi(port, `/api/linkedin-run/${runId}`, { method: "PATCH", body: { heartbeat: true } });
+      } catch (error) {
+        if (isInactiveRunError(error)) {
+          stopRequested = true;
+          stopHeartbeat();
+          showMsg("Run stopped", "The dashboard run is no longer active.");
+          return;
+        }
+        console.warn("[ResumeTracker] Heartbeat failed:", error.message);
+      }
+    };
+    await beat();
+    if (!stopRequested) heartbeatTimer = setInterval(beat, 10_000);
+  }
+
+  function stopHeartbeat() {
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  }
 
   function ensurePanel() {
     if (progressPanel && document.contains(progressPanel)) return progressPanel;
@@ -145,7 +207,32 @@
     }
   }
 
-  async function collectJobTargets(maxJobs) {
+  function normalizeSearchWords(value) {
+    return String(value || "").toLowerCase().match(/[a-z0-9]+/g) || [];
+  }
+
+  function searchWordMatchesTitle(word, title) {
+    if (word.length < 3) return false;
+    if (word === "test") return /\b(?:test|tester|testing|qa|quality assurance)\b/i.test(title);
+    return new RegExp(`\\b${word.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&")}\\w*\\b`, "i").test(title);
+  }
+
+  function isRelevantLinkedInSearchResult(title, keywords) {
+    const searchWords = [...new Set(normalizeSearchWords(keywords).filter((word) => word.length >= 3))];
+    if (searchWords.length === 0) return true;
+    const normalizedTitle = String(title || "").replace(/\s+/g, " ").trim();
+    if (!normalizedTitle) return true;
+    const matches = searchWords.filter((word) => searchWordMatchesTitle(word, normalizedTitle)).length;
+    return matches >= Math.min(2, searchWords.length);
+  }
+
+  function getCardTitle(card) {
+    if (!(card instanceof Element)) return "";
+    const link = card.querySelector("a[href*='/jobs/view/']");
+    return String(link?.textContent || link?.getAttribute("aria-label") || card.innerText || "").replace(/\s+/g, " ").trim();
+  }
+
+  async function collectJobTargets(maxJobs, keywords) {
     const targets = new Map();
     const container = getScrollableResultsContainer();
     let unchangedRounds = 0;
@@ -153,7 +240,9 @@
       const before = targets.size;
       for (const card of getJobCards()) {
         const jobId = getCardJobId(card);
-        if (jobId && !targets.has(jobId)) targets.set(jobId, { jobId });
+        if (jobId && !targets.has(jobId) && isRelevantLinkedInSearchResult(getCardTitle(card), keywords)) {
+          targets.set(jobId, { jobId });
+        }
       }
       unchangedRounds = targets.size === before ? unchangedRounds + 1 : 0;
       const maxTop = Math.max(0, container.scrollHeight - container.clientHeight);
@@ -302,6 +391,37 @@
       throw new Error("Tailored resume artifact is missing or stale");
     }
     return true;
+  }
+
+  async function checkpointRunItem(port, runId, item, phase, note) {
+    await callApi(port, `/api/linkedin-run/${runId}`, {
+      method: "PATCH",
+      body: {
+        item: {
+          ...item,
+          outcome: "processing",
+          phase,
+          note,
+        },
+      },
+    });
+  }
+
+  async function finishRunItem(port, runId, item, outcome, note) {
+    await callApi(port, `/api/linkedin-run/${runId}`, {
+      method: "PATCH",
+      body: {
+        item: {
+          jobId: item.jobId,
+          title: item.title,
+          company: item.company,
+          url: item.url,
+          applyType: item.applyType,
+          outcome,
+          note,
+        },
+      },
+    });
   }
 
   // ── Apply type detection ─────────────────────────────────────────────────
@@ -534,17 +654,35 @@
     } catch { /* non-fatal */ }
   }
 
-  async function waitForUserResume(port, runId, jobId, state, detail = "") {
+  function userPauseCopy(state, detail = "") {
+    const stateReason = state.replace(/^paused-/, "").replaceAll("-", " ");
+    const exactReason = String(detail || "").replace(/\s+/g, " ").trim();
+    if (exactReason) {
+      return {
+        panel: `Confirmation required for: ${exactReason}. Complete this step in LinkedIn, then click Resume automation.`,
+        checkpoint: `Waiting for personal confirmation: ${exactReason}`,
+        note: `Waiting for your confirmation: ${exactReason}. Click Resume automation in LinkedIn when complete.`,
+      };
+    }
+    return {
+      panel: `Complete the ${stateReason} step in LinkedIn, then click Resume automation.`,
+      checkpoint: `Waiting for ${stateReason} confirmation`,
+      note: `Waiting for your ${stateReason} confirmation — click Resume automation in LinkedIn when complete.`,
+    };
+  }
+
+  async function waitForUserResume(port, runId, jobId, state, detail = "", journalItem = null) {
     document.getElementById("rt-auto-progress")?.remove();
-    const reason = state.replace(/^paused-/, "").replaceAll("-", " ");
-    showMsg("Personal confirmation required", detail || `Complete the ${reason} step in LinkedIn, then click Resume automation.`);
+    const copy = userPauseCopy(state, detail);
+    showMsg("Personal confirmation required", copy.panel);
     const resumeButton = ensurePanel().querySelector("#rt-run-resume");
     resumeButton.style.display = "block";
 
     try {
+      if (journalItem) await checkpointRunItem(port, runId, journalItem, "awaiting_user", copy.checkpoint);
       await callApi(port, `/api/linkedin-run/${runId}`, {
         method: "PATCH",
-        body: { note: `Waiting for your ${reason} confirmation — click Resume automation in LinkedIn when complete.` },
+        body: { note: copy.note },
       });
     } catch { /* status note is non-fatal */ }
 
@@ -593,7 +731,7 @@
 
   // ── Easy Apply modal driver ───────────────────────────────────────────────
 
-  async function driveEasyApply(port, runId, jobId, autoSubmit) {
+  async function driveEasyApply(port, runId, jobId, journalItem) {
     const eaBtn = await waitForEasyApplyButton(12_000);
     if (!eaBtn) return { ok: false, note: "Easy Apply button not found" };
     eaBtn.click();
@@ -604,6 +742,8 @@
     } catch {
       return { ok: false, note: "Easy Apply modal did not open" };
     }
+
+    await checkpointRunItem(port, runId, journalItem, "modal_open", "Easy Apply modal opened");
 
     try {
       await callApi(port, `/api/linkedin-run/${runId}`, {
@@ -625,10 +765,11 @@
         auto_continue: true, wait_seconds: 3, pause_on_unknown: true, resume_format: "docx",
       }, {
         auto_continue: true,
-        final_review: !autoSubmit,
+        final_review: true,
         strict_auto_run: true,
         require_tailored_resume: true,
       });
+      window.__rtAutoFill.armResumeUpload(port, jobId);
 
       while (!stopRequested) {
         modal = findActiveEasyApplyModal() || modal;
@@ -643,7 +784,7 @@
 
         if (submitClicked) {
           submitted = await waitForSubmissionResult(modal, 20_000);
-          if (!submitted) return { ok: false, note: "Submit was clicked, but LinkedIn did not confirm the application" };
+          if (!submitted) return { ok: false, paused: true, note: "Submit was clicked, but LinkedIn did not confirm the application; verify it manually before retrying" };
           await markJobApplied(port, jobId);
           return { ok: true, submitted: true, note: "Applied via Easy Apply" };
         }
@@ -651,17 +792,25 @@
         if (pausedForReview) {
           showMsg("Review and submit this application in LinkedIn", "The run will continue after LinkedIn confirms submission.");
           submitted = await waitForSubmissionResult(modal, 5 * 60_000);
-          if (!submitted) return { ok: false, note: "Final review closed or timed out without submission confirmation" };
+          if (!submitted) return { ok: false, paused: true, note: "Final review closed or timed out without submission confirmation; verify it manually before retrying" };
           await markJobApplied(port, jobId);
           return { ok: true, submitted: true, note: "Applied via Easy Apply (manual review)" };
         }
 
         const state = result?.automation?.state || "unknown";
+        if (state === "needs_manual") {
+          leaveOpenForReview = true;
+          return {
+            ok: false,
+            paused: true,
+            note: String(result?.automation?.reason || "Résumé upload needs manual review; no second upload will be attempted."),
+          };
+        }
         if (!/^paused-/.test(state)) return { ok: false, note: `Autofill stopped: ${state}` };
 
         window.__rtAutoFill.setFillRoot(null);
         const pauseDetail = String(result?.automation?.reason || "");
-        const decision = await waitForUserResume(port, runId, jobId, state, pauseDetail);
+        const decision = await waitForUserResume(port, runId, jobId, state, pauseDetail, journalItem);
         if (decision === "submitted") {
           submitted = true;
           await markJobApplied(port, jobId);
@@ -702,7 +851,6 @@
   async function runCrawl(port, run) {
     const runId = run.id;
     const maxJobs = run.max_jobs;
-    const autoSubmit = Boolean(run.auto_submit);
 
     // Mark running
     try { await callApi(port, `/api/linkedin-run/${runId}`, { method: "PATCH", body: { status: "running" } }); } catch { /* non-fatal */ }
@@ -712,6 +860,37 @@
       const state = await callApi(port, `/api/linkedin-run/${runId}`);
       savedItems = Array.isArray(state?.items) ? state.items : [];
     } catch { /* start with the run payload when state cannot be reloaded */ }
+
+    const legacyApplicationWasOpen = savedItems.length === 0 && /waiting for your|easy apply modal opened|submitt(?:ing|ed)|final review/i.test(String(run.note || ""));
+    if (legacyApplicationWasOpen) {
+      const note = "Interrupted during a previous Easy Apply attempt. Verify LinkedIn manually before starting another run.";
+      await callApi(port, `/api/linkedin-run/${runId}`, { method: "PATCH", body: { status: "stopped", note } });
+      showMsg("Previous application needs manual review", note);
+      return;
+    }
+
+    for (let index = 0; index < savedItems.length; index++) {
+      const item = savedItems[index];
+      if (item.outcome !== "processing") continue;
+      let trackedJob = null;
+      if (item.jobId) {
+        try { trackedJob = await callApi(port, `/api/jobs/${item.jobId}`); } catch { /* manual review remains the safe default */ }
+      }
+      if (trackedJob?.status === "applied") {
+        const appliedItem = { ...item, outcome: "applied", note: "Recovered from confirmed tracked application status" };
+        delete appliedItem.phase;
+        await finishRunItem(port, runId, appliedItem, "applied", appliedItem.note);
+        savedItems[index] = appliedItem;
+        continue;
+      }
+
+      const note = "Interrupted after application preparation. Verify LinkedIn manually; this job will not be reopened or submitted automatically.";
+      await finishRunItem(port, runId, item, "needs_manual", note);
+      await callApi(port, `/api/linkedin-run/${runId}`, { method: "PATCH", body: { status: "stopped", note } });
+      showMsg("Interrupted application needs manual review", note);
+      return;
+    }
+
     const processedJobIds = new Set(savedItems.map((item) => jobIdFromValue(item.url)).filter(Boolean));
     let totalProcessed = savedItems.length;
     const remainingAllowance = Math.max(0, maxJobs - totalProcessed);
@@ -722,7 +901,7 @@
     }
 
     showMsg("Collecting job cards…", `${totalProcessed} / ${maxJobs} jobs`);
-    const targets = await collectJobTargets(maxJobs);
+    const targets = await collectJobTargets(maxJobs, run.keywords);
     showMsg(`Found ${targets.length} job cards`, "Starting…");
 
     for (const target of targets) {
@@ -841,6 +1020,15 @@
         continue;
       }
 
+      const journalItem = {
+        jobId: dbJobId,
+        title: jobData.title,
+        company: jobData.company,
+        url: jobData.url || canonicalJobUrl(currentJobId),
+        applyType,
+      };
+      await checkpointRunItem(port, runId, journalItem, "imported", "Job imported; preparing tailored resume");
+
       totalProcessed++;
 
       if (applyType === "external") {
@@ -849,6 +1037,7 @@
         let preparationError = null;
         try { await prepareTailoredResume(port, runId, dbJobId); }
         catch (error) { preparationError = error instanceof Error ? error.message : String(error); }
+        if (!preparationError) await checkpointRunItem(port, runId, journalItem, "prepared", "Tailored resume verified; external application requires manual review");
         await callApi(port, `/api/linkedin-run/${runId}`, {
           method: "PATCH",
           body: {
@@ -887,9 +1076,11 @@
           continue;
         }
 
+        await checkpointRunItem(port, runId, journalItem, "prepared", "Tailored resume verified; opening Easy Apply");
+
         // Drive Easy Apply
         showMsg(`${jobData.company} — applying via Easy Apply…`, "");
-        const applyResult = await driveEasyApply(port, runId, dbJobId, autoSubmit);
+        const applyResult = await driveEasyApply(port, runId, dbJobId, journalItem);
 
         const outcome = applyResult.submitted ? "applied" : applyResult.paused ? "needs_manual" : "failed";
         await callApi(port, `/api/linkedin-run/${runId}`, {
@@ -941,8 +1132,9 @@
   // ── Entry point ───────────────────────────────────────────────────────────
 
   async function start() {
-    const { savedPort } = await chrome.storage.local.get("savedPort");
-    const port = parseInt(savedPort || "3000", 10);
+    let port = 3000;
+    try { port = await resolveRunPort(); }
+    catch (error) { console.warn("[ResumeTracker] Could not resolve app port:", error.message); }
 
     let run = null;
     try {
@@ -963,9 +1155,24 @@
     }
 
     ensurePanel();
+    if (!linkedInIsSignedIn()) {
+      const note = "LinkedIn sign-in is required before Resume Tracker can start this run.";
+      showMsg("Sign in to LinkedIn", "Return to the dashboard and start a new run after signing in.");
+      try { await callApi(port, `/api/linkedin-run/${run.id}`, { method: "PATCH", body: { status: "stopped", note } }); } catch { /* panel still explains the problem */ }
+      window.__rtLinkedInRunActive = false;
+      return;
+    }
+    if (detectCheckpoint()) {
+      const note = "LinkedIn checkpoint / CAPTCHA detected — verify it manually before starting another run.";
+      showMsg("LinkedIn verification required", note);
+      try { await callApi(port, `/api/linkedin-run/${run.id}`, { method: "PATCH", body: { status: "stopped", note } }); } catch { /* panel still explains the problem */ }
+      window.__rtLinkedInRunActive = false;
+      return;
+    }
     showMsg("LinkedIn run starting…", `"${run.keywords}"${run.location ? ` · ${run.location}` : ""}`);
 
     try {
+      await startHeartbeat(port, run.id);
       await runCrawl(port, run);
     } catch (err) {
       showMsg("Run error: " + err.message, "Check the dashboard.");
@@ -975,6 +1182,8 @@
           body: { status: "failed", note: err.message },
         });
       } catch { /* ignore */ }
+    } finally {
+      stopHeartbeat();
       window.__rtLinkedInRunActive = false;
     }
   }
@@ -988,6 +1197,11 @@
       findExternalApplyButton,
       canonicalJobUrl,
       meaningfulDescription,
+      linkedInAppPortFromUrl,
+      isRelevantLinkedInSearchResult,
+      isInactiveRunError,
+      linkedInIsSignedIn,
+      userPauseCopy,
     };
     window.__rtLinkedInRunActive = false;
     return;

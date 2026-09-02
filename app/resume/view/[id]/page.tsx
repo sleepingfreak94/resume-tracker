@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import dynamic from "next/dynamic";
-import { toDriveFilename } from "@/lib/resume-format";
+import { getLocalResumeFilename } from "@/lib/resume-filename-client";
 import JobResumeChat, { getChatMessageCount } from "@/components/JobResumeChat";
 import ATSScorePanel from "@/components/ATSScorePanel";
 import ATSScoreBadge from "@/components/ATSScoreBadge";
@@ -46,17 +46,18 @@ export default function ResumeViewPage() {
     if (!content) return;
     setConverting(true);
     try {
+      const filename = await getLocalResumeFilename();
       const res = await fetch("/api/resume/docx", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content, filename: `resume-job-${id}.docx` }),
+        body: JSON.stringify({ content, filename }),
       });
       if (!res.ok) throw new Error((await res.json()).error);
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `resume-job-${id}.docx`;
+      a.download = filename;
       a.click();
       URL.revokeObjectURL(url);
     } finally {
@@ -127,7 +128,7 @@ export default function ResumeViewPage() {
           </button>
           <SaveToDriveButton
             content={content}
-            filename={toDriveFilename(jobMeta?.company ?? `Job ${id}`)}
+            company={jobMeta?.company}
             storageKey={`job-${id}`}
             returnTo={`/resume/view/${id}`}
           />

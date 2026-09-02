@@ -1,4 +1,5 @@
 const $ = (id) => document.getElementById(id);
+let activePopupTabId = null;
 
 // ── Tabs ──────────────────────────────────────────────────────────────────
 
@@ -25,9 +26,76 @@ function hideStatus(elId = "status") {
   $(elId).style.display = "none";
 }
 
+const RESUME_UPLOAD_STAGE_LABELS = {
+  preparing: "preparing",
+  fetching_profile: "loading profile",
+  fetching_tailored: "loading tailored résumé",
+  generating_document: "generating résumé",
+  starting_download: "starting download",
+  waiting_for_download: "waiting for download",
+  downloaded: "download complete",
+  attaching_debugger: "attaching debugger",
+  debugger_attached: "debugger attached",
+  enabling_chooser: "arming file chooser",
+  resolving_target: "finding Upload control",
+  clicking_upload: "opening file chooser",
+  file_set_pending: "assigning file",
+  file_set: "checking LinkedIn",
+  validating: "checking LinkedIn",
+  validated: "validated",
+  needs_manual: "manual review",
+};
+
+function uploadStageLabel(stage) {
+  return RESUME_UPLOAD_STAGE_LABELS[stage] || String(stage || "unknown").replaceAll("_", " ");
+}
+
+function showResumeUploadStatus(status) {
+  const clearBtn = $("clear-upload-pause-btn");
+  if (!status) {
+    if (clearBtn) clearBtn.style.display = "none";
+    return;
+  }
+  const failedStage = status.failedStage || status.failure?.stage || status.stage;
+  if (status.stage === "validated") {
+    showStatus(`Résumé validated: ${status.filename || "selected file"}.`, "success", "autofill-status");
+  } else if (status.stage === "needs_manual") {
+    showStatus(`Résumé upload paused at ${uploadStageLabel(failedStage)}: ${status.failure?.message || "Review LinkedIn manually. The file will not be uploaded again."}`, "error", "autofill-status");
+  } else {
+    showStatus(`Résumé upload: ${uploadStageLabel(status.stage)}…`, "info", "autofill-status");
+  }
+  if (clearBtn) {
+    const stale = Date.now() - Number(status.updatedAt || 0) > 80_000;
+    const safeToClear = !status.fileSet && !status.ambiguous && status.stage !== "validated" && (status.terminal || stale);
+    clearBtn.style.display = safeToClear ? "block" : "none";
+  }
+}
+
+async function refreshResumeUploadStatus(tabId) {
+  if (!tabId) return;
+  const response = await chrome.runtime.sendMessage({ type: "GET_RESUME_UPLOAD_STATUS", tabId }).catch(() => null);
+  if (response?.ok) showResumeUploadStatus(response.status);
+}
+
 function getPort() {
   const v = parseInt($("port").value, 10);
   return isNaN(v) || v < 1 ? 3000 : v;
+}
+
+async function checkPortConnection() {
+  const status = $("port-status");
+  if (!status) return;
+  status.textContent = "Checking…";
+  status.style.color = "#64748b";
+  try {
+    const response = await fetch(`http://localhost:${getPort()}/api/profile`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    status.textContent = "Connected";
+    status.style.color = "#63cab7";
+  } catch {
+    status.textContent = "Unavailable";
+    status.style.color = "#f87171";
+  }
 }
 
 // ── AI fallback toggle (Import tab) ──────────────────────────────────────
@@ -102,6 +170,7 @@ async function injectLearnedSelectors(tabId, url) {
 async function initAutoFillTab() {
   const port = getPort();
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  activePopupTabId = tab?.id || null;
 
   // Show page context
   const statusEl = $("autofill-page-status");
@@ -145,6 +214,8 @@ async function initAutoFillTab() {
     markBtn.style.display = "none";
   }
 
+  await refreshResumeUploadStatus(tab?.id);
+
   // Load profile preview
   try {
     const res = await fetch(`http://localhost:${port}/api/profile`);
@@ -180,44 +251,66 @@ function esc(s) {
   return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-async function controllerState(tabId) {
-  const [{ result }] = await chrome.scripting.executeScript({
-    target: { tabId },
+const AUTO_FILL_CONTROLLER_VERSION = "3.6.1";
+
+async function controllerStates(tabId) {
+  const executions = await chrome.scripting.executeScript({
+    target: { tabId, allFrames: true },
     func: () => ({
       ready: Boolean(window.__rtAutoFill?.autoApply && window.__rtAutoFill?.fillPage),
       version: window.__rtAutoFill?.version || null,
       loadedFlag: Boolean(window.__resumeTrackerAutoFillLoaded),
       readyState: document.readyState,
+      hasActiveApplicationDialog: Array.from(document.querySelectorAll(".jobs-easy-apply-modal, [role='dialog']")).some((candidate) => {
+        const style = getComputedStyle(candidate);
+        const rect = candidate.getBoundingClientRect();
+        const text = String(candidate.innerText || "").replace(/\s+/g, " ").trim();
+        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0 &&
+          (candidate.matches(".jobs-easy-apply-modal") || /(?:easy apply|apply to|application)/i.test(text));
+      }),
     }),
   });
-  return result || { ready: false, version: null, loadedFlag: false, readyState: "unknown" };
+  return executions.map(({ frameId, result }) => ({
+    frameId,
+    ...(result || { ready: false, version: null, loadedFlag: false, readyState: "unknown", hasActiveApplicationDialog: false }),
+  }));
+}
+
+function preferredControllerState(states) {
+  return states.find((state) => state.ready && state.version === AUTO_FILL_CONTROLLER_VERSION && state.hasActiveApplicationDialog)
+    || states.find((state) => state.ready && state.version === AUTO_FILL_CONTROLLER_VERSION && state.frameId === 0)
+    || states.find((state) => state.ready && state.version === AUTO_FILL_CONTROLLER_VERSION)
+    || null;
 }
 
 async function ensureAutoFillController(tabId) {
-  await chrome.scripting.executeScript({ target: { tabId }, files: ["content-autofill.js"] });
-  let state = await controllerState(tabId);
-  if (state.ready) return state;
+  await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, files: ["content-autofill.js"] });
+  let states = await controllerStates(tabId);
+  let state = preferredControllerState(states);
+  if (state) return state;
 
-  // Recover a tab left with the old script's loaded flag but no controller.
+  // Recover frames left with an old script's loaded flag but no controller.
   await chrome.scripting.executeScript({
-    target: { tabId },
+    target: { tabId, allFrames: true },
     func: () => {
       window.__resumeTrackerAutoFillLoaded = false;
       delete window.__rtAutoFill;
       document.getElementById("rt-fab")?.remove();
     },
   });
-  await chrome.scripting.executeScript({ target: { tabId }, files: ["content-autofill.js"] });
-  state = await controllerState(tabId);
-  if (!state.ready) {
-    throw new Error(`Autofill controller did not start (page: ${state.readyState}, loaded flag: ${state.loadedFlag ? "yes" : "no"}). Refresh this LinkedIn tab once, then retry.`);
+  await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, files: ["content-autofill.js"] });
+  states = await controllerStates(tabId);
+  state = preferredControllerState(states);
+  if (!state) {
+    const fallback = states[0] || { readyState: "unknown", loadedFlag: false };
+    throw new Error(`Autofill controller ${AUTO_FILL_CONTROLLER_VERSION} did not start in the application frame (page: ${fallback.readyState}, loaded flag: ${fallback.loadedFlag ? "yes" : "no"}). Refresh this LinkedIn tab once, then retry.`);
   }
   return state;
 }
 
-async function invokeAutoFill(tabId, method, args) {
-  const [{ result }] = await chrome.scripting.executeScript({
-    target: { tabId },
+async function invokeAutoFill(tabId, frameId, method, args) {
+  const execution = chrome.scripting.executeScript({
+    target: { tabId, frameIds: [frameId] },
     func: async (methodName, methodArgs) => {
       const controller = window.__rtAutoFill;
       const fn = controller?.[methodName];
@@ -230,8 +323,47 @@ async function invokeAutoFill(tabId, method, args) {
     },
     args: [method, args],
   });
+  const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error(
+    "Autofill exceeded its safety deadline. If a résumé upload was in progress, do not retry it; review LinkedIn and the saved upload status.",
+  )), 90_000));
+  const [{ result }] = await Promise.race([execution, timeout]);
   if (!result?.ok) throw new Error(result?.error || "The autofill controller returned no result.");
   return result.data;
+}
+
+function linkedInPostingIdFromUrl(value) {
+  try {
+    const url = new URL(value);
+    if (!/(^|\.)linkedin\.com$/i.test(url.hostname)) return null;
+    return url.pathname.match(/\/jobs\/view\/(\d+)/i)?.[1]
+      || (/^\d+$/.test(url.searchParams.get("currentJobId") || "") ? url.searchParams.get("currentJobId") : null);
+  } catch {
+    return null;
+  }
+}
+
+async function uploadLinkedInResumeFromPopup({ tabId, tabUrl, port, jobId }) {
+  let format = "docx";
+  try {
+    const settingsResponse = await fetch(`http://localhost:${port}/api/application-settings`);
+    if (settingsResponse.ok) {
+      const settings = await settingsResponse.json();
+      format = settings?.resume_format === "pdf" ? "pdf" : "docx";
+    }
+  } catch {
+    // DOCX remains the safe default.
+  }
+  const linkedInJobId = linkedInPostingIdFromUrl(tabUrl);
+  if (!linkedInJobId) return null;
+  return chrome.runtime.sendMessage({
+    type: "UPLOAD_RESUME_VIA_CDP",
+    tabId,
+    port,
+    jobId,
+    format,
+    linkedInJobId,
+    attemptId: `rt_popup_${Date.now().toString(36)}_${Math.random().toString(36).slice(2).padEnd(20, "0")}`,
+  });
 }
 
 // ── Auto Apply ────────────────────────────────────────────────────────────
@@ -246,8 +378,6 @@ async function runAutoApply(fieldsOnly = false) {
   showStatus(fieldsOnly ? "Filling form fields…" : "Auto applying…", "info", "autofill-status");
 
   try {
-    await ensureAutoFillController(tab.id);
-
     let jobId = null;
     if (tab.url) {
       const hashMatch = tab.url.match(/rt_job_id=(\d+)/);
@@ -258,12 +388,28 @@ async function runAutoApply(fieldsOnly = false) {
       jobId = stored.activeJobId || null;
     }
 
+    if (!fieldsOnly && jobId && tab.url) {
+      const upload = await uploadLinkedInResumeFromPopup({ tabId: tab.id, tabUrl: tab.url, port, jobId });
+      if (upload?.ok) {
+        showStatus(`${String(upload.filename || "Résumé")} uploaded and selected in LinkedIn. Review the application before continuing; submission is still manual.`, "success", "autofill-status");
+        await refreshResumeUploadStatus(tab.id);
+        return;
+      }
+      if (upload && !(upload.failure?.reason === "input_not_found" && upload.stage === "accessibility_target")) {
+        showStatus(`Résumé upload paused at ${uploadStageLabel(upload.stage || "unknown")}: ${upload.failure?.message || "Review LinkedIn manually. The file will not be uploaded again."}`, "error", "autofill-status");
+        await refreshResumeUploadStatus(tab.id);
+        return;
+      }
+    }
+
+    const controller = await ensureAutoFillController(tab.id);
+
     if (fieldsOnly) {
       const profileRes = await fetch(`http://localhost:${port}/api/profile`);
       if (!profileRes.ok) throw new Error(`App not responding on port ${port}`);
       const profile = await profileRes.json();
 
-      const result = await invokeAutoFill(tab.id, "fillPage", [profile]);
+      const result = await invokeAutoFill(tab.id, controller.frameId, "fillPage", [profile]);
 
       if (!result || result.filled === 0) {
         showStatus("No matching fields found on this page.", "warning", "autofill-status");
@@ -273,10 +419,22 @@ async function runAutoApply(fieldsOnly = false) {
       return;
     }
 
-    const result = await invokeAutoFill(tab.id, "autoApply", [port, jobId]);
+    // This explicit user-initiated automation session also watches later Easy
+    // Apply steps for a rendered resume field. It never advances the form by
+    // itself; autoApply remains responsible for that when configured.
+    if (jobId) await invokeAutoFill(tab.id, controller.frameId, "armResumeUpload", [port, jobId]);
+    const result = await invokeAutoFill(tab.id, controller.frameId, "autoApply", [port, jobId]);
 
     if (!result) {
       showStatus("Autofill returned no result. Refresh this LinkedIn tab once, then retry.", "error", "autofill-status");
+      return;
+    }
+
+    if (result.resumeUploadFailure || result.automation?.state === "needs_manual") {
+      const uploadFailure = result.resumeUploadFailure || result.automation?.failure || {};
+      const stage = uploadFailure.stage || result.resumeUploadResult?.stage || "validation";
+      showStatus(`Résumé upload paused at ${uploadStageLabel(stage)}: ${uploadFailure.message || result.resumeUploadError || result.automation?.reason || "Review LinkedIn manually. The file will not be uploaded again."}`, "error", "autofill-status");
+      await refreshResumeUploadStatus(tab.id);
       return;
     }
 
@@ -294,9 +452,7 @@ async function runAutoApply(fieldsOnly = false) {
         ? ` ${result.questionsUnanswered} question${result.questionsUnanswered === 1 ? " needs" : "s need"} your review.`
         : "";
       const aiWarning = result.aiError ? ` AI answers were unavailable: ${result.aiError}` : "";
-      const automationText = result.automation?.state === "submitted"
-        ? " Application submitted automatically; verify the confirmation page."
-        : result.automation?.state === "final-review"
+      const automationText = result.automation?.state === "final-review"
           ? " Final review is on, so submission is waiting for you."
           : result.automation?.state === "next"
             ? " Continued to the next application step."
@@ -322,6 +478,18 @@ async function runAutoApply(fieldsOnly = false) {
 
 $("fill-btn").addEventListener("click", () => runAutoApply(false));
 $("fill-fields-btn").addEventListener("click", () => runAutoApply(true));
+
+$("clear-upload-pause-btn").addEventListener("click", async () => {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id) return;
+  const response = await chrome.runtime.sendMessage({ type: "CLEAR_RESUME_UPLOAD_ATTEMPT", tabId: tab.id }).catch(() => null);
+  if (response?.ok) {
+    $("clear-upload-pause-btn").style.display = "none";
+    showStatus("The safe pre-upload pause was cleared. No file had been selected.", "success", "autofill-status");
+  } else {
+    showStatus(response?.failure?.message || response?.error || "This upload pause cannot be cleared safely.", "error", "autofill-status");
+  }
+});
 
 // ── Download Resume ───────────────────────────────────────────────────────
 
@@ -409,9 +577,11 @@ $("mark-applied-btn").addEventListener("click", async () => {
 async function init() {
   const { savedPort } = await chrome.storage.local.get("savedPort");
   if (savedPort) $("port").value = savedPort;
-  $("port").addEventListener("change", () =>
-    chrome.storage.local.set({ savedPort: $("port").value })
-  );
+  $("port").addEventListener("change", async () => {
+    await chrome.storage.local.set({ savedPort: $("port").value });
+    await checkPortConnection();
+  });
+  await checkPortConnection();
 
   setupAiToggle();
 
@@ -590,6 +760,11 @@ $("open-btn").addEventListener("click", () => {
 
 // Listen for resume upload detection from content-autofill.js
 chrome.runtime.onMessage.addListener((msg) => {
+  if (msg.type === "RESUME_UPLOAD_STAGE") {
+    if (activePopupTabId && msg.status?.tabId !== activePopupTabId) return;
+    showResumeUploadStatus(msg.status);
+    return;
+  }
   if (msg.type === "RESUME_UPLOAD_DETECTED") {
     // Switch to autofill tab and show modal if popup is open
     const autofillTab = $("tab-autofill");

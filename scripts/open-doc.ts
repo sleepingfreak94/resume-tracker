@@ -3,8 +3,8 @@ import path from "path";
 import { execSync } from "child_process";
 import { buildDocxBuffer } from "../lib/md-to-docx";
 import { isGoogleConfigured, isGoogleConnected, uploadDocx } from "../lib/google-drive";
-import { getJob } from "../lib/db";
-import { toDriveFilename } from "../lib/resume-format";
+import { getJob, getProfile } from "../lib/db";
+import { toDriveFilename, toResumeFilename } from "../lib/resume-format";
 
 function loadEnv() {
   const envPath = path.join(process.cwd(), ".env.local");
@@ -47,10 +47,11 @@ function resolveMdPath(arg: string): { mdPath: string; jobId?: number } {
 }
 
 function resolveFilename(target: string, jobId?: number): string {
-  if (target === "base") return "Base Resume.docx";
+  const profile = getProfile();
+  if (target === "base") return toResumeFilename(profile);
   if (jobId) {
     const job = getJob(jobId);
-    if (job) return toDriveFilename(job.company);
+    if (job) return toDriveFilename(profile, job.company);
   }
   const base = path.basename(target, path.extname(target));
   return `${base}.docx`;

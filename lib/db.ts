@@ -2,6 +2,7 @@ import Database from "better-sqlite3";
 import path from "path";
 import fs from "fs";
 import { JobStatus, STATUS_CHECK_SQL } from "./job-status";
+import { shouldExpireLinkedInRun } from "./linkedin-run";
 
 const DB_PATH = path.join(process.cwd(), "data", "resume-tracker.db");
 
@@ -155,6 +156,8 @@ function initSchema(db: Database.Database) {
       location TEXT,
       max_jobs INTEGER NOT NULL DEFAULT 15,
       auto_submit INTEGER NOT NULL DEFAULT 0,
+      app_port INTEGER NOT NULL DEFAULT 3000,
+      heartbeat_at TEXT,
       status TEXT NOT NULL DEFAULT 'queued'
         CHECK(status IN ('queued','running','tailoring','done','stopped','failed')),
       -- ponytail: items stored as JSON blob; not queryable per-item. Fine for a single-user run log.
@@ -170,6 +173,7 @@ function initSchema(db: Database.Database) {
   migrateAddLastActivity(db);
   migrateAddProfileWorkAuth(db);
   migrateApplicationAnswerIntelligence(db);
+  migrateLinkedInRunConnectivity(db);
   db.exec("CREATE UNIQUE INDEX IF NOT EXISTS jobs_job_link_unique ON jobs(job_link) WHERE job_link IS NOT NULL");
   db.exec("CREATE INDEX IF NOT EXISTS application_answers_normalized_idx ON application_answers(normalized_question, scope)");
   db.exec("CREATE INDEX IF NOT EXISTS application_aliases_normalized_idx ON application_answer_aliases(normalized_question)");
@@ -292,6 +296,23 @@ function migrateApplicationAnswerIntelligence(db: Database.Database) {
   }
   db.prepare("UPDATE application_answers SET last_confirmed_at = updated_at WHERE is_confirmed = 1 AND last_confirmed_at IS NULL").run();
   db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").run("application_answer_intelligence_v1", "1");
+}
+
+function migrateLinkedInRunConnectivity(db: Database.Database) {
+  const migrationKey = "linkedin_run_connectivity_v1";
+  const row = db.prepare("SELECT value FROM settings WHERE key = ?").get(migrationKey) as { value: string } | undefined;
+  if (row?.value === "1") return;
+  for (const column of [
+    "app_port INTEGER NOT NULL DEFAULT 3000",
+    "heartbeat_at TEXT",
+  ]) {
+    try {
+      db.exec(`ALTER TABLE linkedin_runs ADD COLUMN ${column}`);
+    } catch {
+      // Column may already exist when the database was created from the current schema.
+    }
+  }
+  db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").run(migrationKey, "1");
 }
 
 // --- Job helpers ---
@@ -575,7 +596,8 @@ export interface LinkedInRunItem {
   company: string;
   url: string;
   applyType: "easy_apply" | "external";
-  outcome: "applied" | "needs_manual" | "failed" | "skipped";
+  outcome: "processing" | "applied" | "needs_manual" | "failed" | "skipped";
+  phase?: "imported" | "prepared" | "modal_open" | "awaiting_user" | "submission_started";
   note: string;
 }
 
@@ -585,6 +607,8 @@ export interface LinkedInRun {
   location: string | null;
   max_jobs: number;
   auto_submit: number;
+  app_port: number;
+  heartbeat_at: string | null;
   status: LinkedInRunStatus;
   items_json: string;
   note: string | null;
@@ -592,11 +616,11 @@ export interface LinkedInRun {
   updated_at: string;
 }
 
-export function createLinkedInRun(data: Pick<LinkedInRun, "keywords" | "location" | "max_jobs" | "auto_submit">): LinkedInRun {
+export function createLinkedInRun(data: Pick<LinkedInRun, "keywords" | "location" | "max_jobs" | "auto_submit" | "app_port">): LinkedInRun {
   const db = getDb();
   const result = db.prepare(
-    "INSERT INTO linkedin_runs (keywords, location, max_jobs, auto_submit) VALUES (?, ?, ?, ?)"
-  ).run(data.keywords, data.location ?? null, data.max_jobs, data.auto_submit);
+    "INSERT INTO linkedin_runs (keywords, location, max_jobs, auto_submit, app_port) VALUES (?, ?, ?, ?, ?)"
+  ).run(data.keywords, data.location ?? null, data.max_jobs, data.auto_submit, data.app_port);
   return db.prepare("SELECT * FROM linkedin_runs WHERE id = ?").get(result.lastInsertRowid) as LinkedInRun;
 }
 
@@ -605,9 +629,40 @@ export function getLinkedInRun(id: number): LinkedInRun | undefined {
 }
 
 export function getActiveLinkedInRun(): LinkedInRun | undefined {
+  expireStaleLinkedInRuns();
   return getDb()
     .prepare("SELECT * FROM linkedin_runs WHERE status IN ('queued','running','tailoring') ORDER BY created_at DESC LIMIT 1")
     .get() as LinkedInRun | undefined;
+}
+
+export function expireStaleLinkedInRuns(nowMs = Date.now()): number {
+  const db = getDb();
+  const runs = db.prepare("SELECT * FROM linkedin_runs WHERE status IN ('queued','running','tailoring')").all() as LinkedInRun[];
+  const update = db.prepare("UPDATE linkedin_runs SET status = 'failed', note = ?, items_json = ?, updated_at = datetime('now') WHERE id = ?");
+  let expired = 0;
+
+  for (const run of runs) {
+    if (!shouldExpireLinkedInRun(run, nowMs)) continue;
+    const items = JSON.parse(run.items_json) as LinkedInRunItem[];
+    const finalizedItems = items.map((item) => {
+      if (item.outcome !== "processing") return item;
+      const completedItem: LinkedInRunItem = {
+        ...item,
+        outcome: "failed" as const,
+        note: "Extension connection timed out before this job was completed. Review it manually before retrying.",
+      };
+      delete completedItem.phase;
+      return completedItem;
+    });
+    update.run(
+      "Extension connection timed out. This run was stopped to prevent a stale browser session from blocking new searches.",
+      JSON.stringify(finalizedItems),
+      run.id,
+    );
+    expired++;
+  }
+
+  return expired;
 }
 
 export function listLinkedInRuns(limit = 20): LinkedInRun[] {
@@ -624,6 +679,10 @@ export function updateLinkedInRun(id: number, data: Partial<Pick<LinkedInRun, "s
   db.prepare(`UPDATE linkedin_runs SET ${sets.join(", ")} WHERE id = ?`).run(...vals);
 }
 
+export function heartbeatLinkedInRun(id: number): void {
+  getDb().prepare("UPDATE linkedin_runs SET heartbeat_at = datetime('now') WHERE id = ?").run(id);
+}
+
 export function appendLinkedInRunItem(id: number, item: LinkedInRunItem): void {
   const db = getDb();
   const run = db.prepare("SELECT items_json FROM linkedin_runs WHERE id = ?").get(id) as { items_json: string } | undefined;
@@ -631,7 +690,7 @@ export function appendLinkedInRunItem(id: number, item: LinkedInRunItem): void {
   const items: LinkedInRunItem[] = JSON.parse(run.items_json);
   const existingIndex = items.findIndex((existing) =>
     (item.jobId != null && existing.jobId === item.jobId) ||
-    (item.jobId == null && item.url && existing.url === item.url)
+    Boolean(item.url && existing.url === item.url)
   );
   if (existingIndex >= 0) items[existingIndex] = item;
   else items.push(item);

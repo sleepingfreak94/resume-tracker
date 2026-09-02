@@ -7,8 +7,8 @@ import {
   isInvalidGrantError,
   uploadDocx,
 } from "@/lib/google-drive";
-import { getSetting, setSetting } from "@/lib/db";
-import { sanitizeDownloadFilename } from "@/lib/validation";
+import { getProfile, getSetting, setSetting } from "@/lib/db";
+import { toDriveFilename } from "@/lib/resume-format";
 
 function driveSettingKey(key: string) {
   return `drive_url:${key}`;
@@ -39,14 +39,13 @@ export async function POST(req: NextRequest) {
       return needsAuthResponse();
     }
 
-    const { content, filename, storageKey } = await req.json();
+    const { content, company, storageKey } = await req.json();
     if (!content) {
       return NextResponse.json({ error: "content is required" }, { status: 400 });
     }
 
     const buffer = await buildDocxBuffer(content);
-    const base = sanitizeDownloadFilename(filename, "resume.docx");
-    const outFilename = base.toLowerCase().endsWith(".docx") ? base : `${base}.docx`;
+    const outFilename = toDriveFilename(getProfile(), typeof company === "string" ? company : null);
     const { fileId, url } = await uploadDocx(buffer, outFilename);
 
     if (typeof storageKey === "string" && /^[a-zA-Z0-9:_-]{1,100}$/.test(storageKey)) {

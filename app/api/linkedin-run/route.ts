@@ -18,8 +18,9 @@ export async function POST(req: NextRequest) {
       location: input.location,
       max_jobs: input.max_jobs,
       auto_submit: input.auto_submit ? 1 : 0,
+      app_port: input.app_port,
     });
-    const searchUrl = buildLinkedInSearchUrl({ keywords: run.keywords, location: run.location });
+    const searchUrl = buildLinkedInSearchUrl({ keywords: run.keywords, location: run.location, appPort: run.app_port, runId: run.id });
     return NextResponse.json({ run, searchUrl }, { status: 201 });
   } catch (err) {
     return NextResponse.json({ error: err instanceof Error ? err.message : String(err) }, { status: 400 });
