@@ -6,7 +6,7 @@
   // be interrupted after setting a flag (for example when the extension is
   // reloaded while a LinkedIn tab stays open), so a flag alone is not proof
   // that autofill is ready.
-  if (window.__rtAutoFill?.version === "3.6.1" && window.__rtAutoFill?.autoApply && window.__rtAutoFill?.fillPage) return;
+  if (window.__rtAutoFill?.version === "3.6.7" && window.__rtAutoFill?.autoApply && window.__rtAutoFill?.fillPage) return;
   window.__resumeTrackerAutoFillLoaded = false;
 
   // ── Scoped root ───────────────────────────────────────────────────────────
@@ -17,6 +17,7 @@
   let _armedResumeUpload = null;
   let _resumeUploadObserver = null;
   let _resumeUploadTimer = null;
+  let _resumeUploadPollTimer = null;
   let _resumeUploadInFlight = false;
   let _resumeUploadFrameObservers = [];
   const _resumeUploadAttempts = new Map();
@@ -737,21 +738,23 @@
     return { state: "paused-safety", reasons, reason: personalReviewReason(reasons) };
   }
 
-  function actionButtonText(el) {
-    return cleanText(el.innerText || el.value || el.getAttribute("aria-label") || el.title);
+  function applicationAction(el) {
+    const labels = [...new Set([el.innerText, el.value, el.getAttribute("aria-label"), el.title]
+      .map(cleanText).filter(Boolean))];
+    const finalPattern = /^(submit( application)?|send application|finish application|complete application|apply now)$/i;
+    const nextPattern = /^(next|continue to next step|continue|save( and)? continue|save & continue|review(?: your)?(?: application)?|proceed)(\s*[›>→])?$/i;
+    // A submission label must win even if another label says Next or Review.
+    const finalLabel = labels.find((label) => finalPattern.test(label));
+    if (finalLabel) return { element: el, final: true, label: finalLabel };
+    const nextLabel = labels.find((label) => nextPattern.test(label));
+    return nextLabel ? { element: el, final: false, label: nextLabel } : null;
   }
 
   function findApplicationAction() {
     const candidates = Array.from(root().querySelectorAll("button, input[type='submit'], input[type='button'], [role='button']"))
       .filter((el) => isVisible(el) && !el.closest("#rt-fab, #rt-auto-progress") && !el.disabled && el.getAttribute("aria-disabled") !== "true");
-    // LinkedIn Easy Apply adds these aria-labels on its modal buttons.
-    const finalPattern = /^(submit( application)?|send application|finish application|complete application|apply now)$/i;
-    const nextPattern = /^(next|continue to next step|continue|save( and)? continue|save & continue|review( your)? application|proceed)(\s*[›>→])?$/i;
-    const finalButton = candidates.find((el) => finalPattern.test(actionButtonText(el)));
-    const nextButton = candidates.find((el) => nextPattern.test(actionButtonText(el)));
-    if (nextButton) return { element: nextButton, final: false, label: actionButtonText(nextButton) };
-    if (finalButton) return { element: finalButton, final: true, label: actionButtonText(finalButton) };
-    return null;
+    const actions = candidates.map(applicationAction).filter(Boolean);
+    return actions.find((action) => !action.final) || actions.find((action) => action.final) || null;
   }
 
   function applicationStepSignature() {
@@ -783,12 +786,35 @@
     return panel;
   }
 
+  let automationMessageTimer = null;
+  let finalReviewMessage = null;
+
+  function updateFinalReviewMessage() {
+    if (!finalReviewMessage) return;
+    const { panel, button, url } = finalReviewMessage;
+    const style = (button.ownerDocument?.defaultView || window).getComputedStyle(button);
+    const rect = button.getBoundingClientRect();
+    const rendered = style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+    // A closed/replaced form is not proof of success. Just remove the obsolete
+    // instruction; the run's separate confirmation detector records success.
+    if (location.href !== url || !document.contains(button) || !rendered || !applicationAction(button)?.final) {
+      panel.remove();
+      finalReviewMessage = null;
+    }
+  }
+
   function showAutomationMessage(message, { cancellable = false, duration = 6000 } = {}) {
+    if (automationMessageTimer !== null) clearTimeout(automationMessageTimer);
+    automationMessageTimer = null;
+    finalReviewMessage = null;
     const panel = automationPanel();
     panel.querySelector("#rt-auto-copy").textContent = message;
     const cancel = panel.querySelector("#rt-auto-cancel");
     cancel.style.display = cancellable ? "block" : "none";
-    if (!cancellable && duration > 0) setTimeout(() => panel.remove(), duration);
+    if (!cancellable && duration > 0) automationMessageTimer = setTimeout(() => {
+      panel.remove();
+      automationMessageTimer = null;
+    }, duration);
     return { panel, cancel };
   }
 
@@ -849,7 +875,22 @@
     }
     if (action.final) {
       await clearAutoFillSession();
-      showAutomationMessage("Review the application, then submit it yourself when ready.", { duration: 0 });
+      let verifiedFilename = null;
+      if (jobId && /(^|\.)linkedin\.com$/i.test(window.location.hostname)) {
+        const verification = await sendRuntimeMessage({
+          type: "VERIFY_RESUME_SELECTION", port, jobId,
+          format: settings.resume_format === "pdf" ? "pdf" : "docx",
+          linkedInJobId: linkedInPostingId(),
+        });
+        if (!verification?.ok) {
+          const reason = verification?.failure?.message || "The generated résumé could not be verified on final review.";
+          showAutomationMessage(`Résumé not verified: ${reason}`, { duration: 0 });
+          return { state: "needs_manual", reason };
+        }
+        verifiedFilename = verification.filename;
+      }
+      const { panel } = showAutomationMessage(`${verifiedFilename ? `Verified attached résumé: ${verifiedFilename}. ` : ""}Review the application, then submit it yourself when ready.`, { duration: 0 });
+      finalReviewMessage = { panel, button: action.element, url: location.href };
       return { state: "final-review", label: action.label };
     }
 
@@ -1029,13 +1070,11 @@
       const text = cleanText(candidate.innerText || candidate.textContent || "").toLowerCase();
       if (!text.includes(wanted)) return false;
       const card = candidate.matches?.(selectedCardSelector) ? candidate : candidate.closest?.(selectedCardSelector);
-      if (!card) return true;
+      if (!card) return false;
       if (card.getAttribute("aria-checked") === "true" || card.getAttribute("aria-selected") === "true") return true;
       if (/(?:^|\s)(?:selected|active)(?:\s|$)/i.test(Array.from(card.classList || []).join(" "))) return true;
       if (card.querySelector?.("input[type='radio']:checked, input[type='checkbox']:checked")) return true;
-      // A newly uploaded LinkedIn document card is the selected résumé even on
-      // markup variants that do not expose an explicit checked state.
-      return isRenderedUploadElement(card);
+      return false;
     });
   }
 
@@ -1166,14 +1205,21 @@
   // followed by another automated upload.
   async function uploadResumeToVisibleFields({ port, jobId, format = "docx", controls = null } = {}) {
     const resumeUploadControls = controls || activeResumeUploadControls(findInputs().fileInputs);
-    if (resumeUploadControls.length === 0) {
+    const linkedIn = Boolean(jobId) && /(^|\.)linkedin\.com$/i.test(window.location.hostname);
+    if (resumeUploadControls.length === 0 && !linkedIn) {
       return { resumeUploaded: 0, resumeUploadError: null, resumeUploadFailure: null, resumeUploadControls };
     }
 
-    const control = resumeUploadControls[0];
+    const control = resumeUploadControls[0] || null;
     const attemptKey = `${window.location.origin}:${Number(jobId) || 0}:${format}`;
     const response = await runResumeUploadOnce(attemptKey, () => performResumeCdpUpload({ port, jobId, format, control }));
-    if (response.ok) highlightFilled(control.field || control.input || control.uploadButton);
+    if (!response.ok && response.stage === "accessibility_target" && response.cdpStatus === "not_started") {
+      // A non-resume step is only a probe miss, not an upload attempt. Probe
+      // again on the next step, even when content-script DOM queries are empty.
+      _resumeUploadAttempts.delete(attemptKey);
+      return { resumeUploaded: 0, resumeUploadError: null, resumeUploadFailure: null, resumeUploadControls };
+    }
+    if (response.ok && control) highlightFilled(control.field || control.input || control.uploadButton);
     return {
       resumeUploaded: response.ok ? 1 : 0,
       resumeUploadError: response.ok ? null : response.failure?.message || "Résumé upload needs manual review.",
@@ -1215,7 +1261,9 @@
 
   function disarmResumeUpload({ notifyBackground = true } = {}) {
     if (_resumeUploadTimer) clearTimeout(_resumeUploadTimer);
+    if (_resumeUploadPollTimer) clearInterval(_resumeUploadPollTimer);
     _resumeUploadTimer = null;
+    _resumeUploadPollTimer = null;
     _resumeUploadObserver?.disconnect();
     _resumeUploadObserver = null;
     _resumeUploadFrameObservers.forEach((observer) => observer.disconnect());
@@ -1237,13 +1285,16 @@
 
   async function checkArmedResumeUpload() {
     const state = _armedResumeUpload;
-    if (!state || state.failed || _resumeUploadInFlight) return;
-    const modal = activeEasyApplyRoot();
-    if (!modal) {
-      if (state.sawModal) disarmResumeUpload();
+    if (!state || state.failed || state.uploaded || _resumeUploadInFlight) return;
+    if (Date.now() - state.startedAt > 10 * 60 * 1000) {
+      disarmResumeUpload();
       return;
     }
-    state.sawModal = true;
+    const modal = activeEasyApplyRoot();
+    const linkedIn = /(^|\.)linkedin\.com$/i.test(window.location.hostname);
+    // LinkedIn's SDUI application can appear in the accessibility tree while
+    // its modal and upload controls are absent from the content-script DOM.
+    if (!modal && !linkedIn) return;
 
     const previousRoot = _fillRoot;
     _fillRoot = modal;
@@ -1251,7 +1302,7 @@
       .filter((control) => !state.uploadedInputs.has(control.input || control.uploadButton))
       .slice(0, 1);
     _fillRoot = previousRoot;
-    if (pendingControls.length === 0) return;
+    if (pendingControls.length === 0 && !linkedIn) return;
 
     _resumeUploadInFlight = true;
     try {
@@ -1273,14 +1324,19 @@
 
       if (upload.resumeUploadError) {
         state.failed = true;
+        clearInterval(_resumeUploadPollTimer);
         const reason = upload.resumeUploadError;
         showAutomationMessage(`Resume upload paused: ${reason}`, { duration: 0 });
         return;
       }
+      if (!upload.resumeUploaded) return; // Contact/questions step: keep watching.
+      state.uploaded = true;
+      clearInterval(_resumeUploadPollTimer);
       pendingControls.forEach((control) => state.uploadedInputs.add(control.input || control.uploadButton));
-      showAutomationMessage(`Tailored résumé uploaded to ${pendingControls.length} résumé field${pendingControls.length === 1 ? "" : "s"}.`);
+      showAutomationMessage(`Verified selected résumé: ${upload.resumeUploadResult.filename}. Check this filename on LinkedIn's review page.`, { duration: 0 });
     } catch (error) {
       state.failed = true;
+      clearInterval(_resumeUploadPollTimer);
       const reason = error instanceof Error ? error.message : String(error);
       showAutomationMessage(`Resume upload paused: ${reason}`, { duration: 0 });
     } finally {
@@ -1297,7 +1353,7 @@
     disarmResumeUpload({ notifyBackground: false });
     _localPort = parsedPort;
     persistJobId(parsedJobId);
-    _armedResumeUpload = { port: parsedPort, jobId: parsedJobId, sawModal: false, failed: false, uploadedInputs: new WeakSet() };
+    _armedResumeUpload = { port: parsedPort, jobId: parsedJobId, startedAt: Date.now(), failed: false, uploaded: false, uploadedInputs: new WeakSet() };
     _resumeUploadObserver = new MutationObserver(() => scheduleArmedResumeUpload());
     _resumeUploadObserver.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ["class", "style", "aria-hidden", "hidden"] });
     _resumeUploadFrameObservers = accessibleDocuments().slice(1).map((frameDocument) => {
@@ -1305,6 +1361,8 @@
       observer.observe(frameDocument.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ["class", "style", "aria-hidden", "hidden"] });
       return observer;
     });
+    // Frame/SDUI changes need not mutate the parent document at all.
+    _resumeUploadPollTimer = setInterval(() => { void checkArmedResumeUpload(); }, 2000);
     scheduleArmedResumeUpload(0);
     return { armed: true, jobId: parsedJobId };
   }
@@ -1360,7 +1418,7 @@
       }
     }
 
-    if (resumeUploadControls.length > 0 && (resumeUploadError || resumeUploaded !== 1)) {
+    if (resumeUploadError || (resumeUploadControls.length > 0 && resumeUploaded !== 1)) {
       return {
         filled: result.filled, resumeUploaded, coverLetterFilled, resumeUploads: result.resumeUploads,
         resumeFormat, jobId, resumeUploadError, resumeUploadFailure,
@@ -1697,6 +1755,11 @@
 
   if (window.__RT_AUTOFILL_TEST__) {
     window.__rtAutoFillTest = {
+      findApplicationAction,
+      runAutomationStep,
+      updateFinalReviewMessage,
+      showAutomationMessage,
+      setFillRoot: (el) => { _fillRoot = el || null; },
       isVisibleCaptchaChallenge,
       personalReviewReasons,
       personalReviewReason,
@@ -1715,12 +1778,16 @@
       selectedResumeFilenamePresent,
       resumeAcceptanceState,
       runResumeUploadOnce,
+      uploadResumeToVisibleFields,
+      armResumeUpload,
+      checkArmedResumeUpload,
+      disarmResumeUpload,
     };
     return;
   }
 
   window.__rtAutoFill = {
-    version: "3.6.1",
+    version: "3.6.7",
     fillPage,
     autoApply,
     armResumeUpload,
@@ -1765,7 +1832,7 @@
     if (!event.isTrusted || !(event.target instanceof Element)) return;
     const action = event.target.closest("button, input[type='submit'], input[type='button'], [role='button']");
     if (!action || action.closest("#rt-fab, #rt-auto-progress, #rt-run-progress")) return;
-    if (!/^(next|continue(?: to next step)?|save(?: and| &) continue|review(?: your)? application|proceed|submit(?: application)?|send application|finish application|complete application|apply now)$/i.test(actionButtonText(action))) return;
+    if (!applicationAction(action)) return;
     const captureRoot = action.closest("[role='dialog'], form") || _fillRoot;
     void captureAnsweredQuestions(_localPort, detectTrackedJobId(), { fillRoot: captureRoot })
       .catch((error) => console.warn("[ResumeTracker] Could not learn answers before navigation:", error));
@@ -1780,6 +1847,7 @@
   // Watch for SPA navigation (Workday, Greenhouse use heavy JS routing)
   let lastUrl = location.href;
   const observer = new MutationObserver(() => {
+    updateFinalReviewMessage();
     if (location.href !== lastUrl) {
       lastUrl = location.href;
       if (isJobApplicationPage() && !document.getElementById("rt-fab")) {
@@ -1787,7 +1855,7 @@
       }
     }
   });
-  observer.observe(document.body, { childList: true, subtree: true });
+  observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["class", "style", "hidden", "aria-hidden", "aria-label"] });
 
   // Mark the script loaded only after the public controller and its observer
   // have been installed successfully.

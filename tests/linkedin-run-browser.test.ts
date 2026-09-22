@@ -8,6 +8,7 @@ class FakeElement {
   innerText: string;
   textContent: string;
   tagName: string;
+  id = "";
   title = "";
   disabled = false;
   hidden = false;
@@ -59,6 +60,7 @@ class FakeElement {
   }
 
   matches(selector: string) {
+    if (this.id && selector.split(",").some((part) => part.trim() === `#${this.id}`)) return true;
     if (selector.includes("captcha-response") && /captcha-response/i.test(Object.values(this.attributes).join(" "))) return true;
     if (selector.includes("aria-checked='true'") && this.getAttribute("aria-checked") === "true") return true;
     if (selector.includes("aria-selected='true'") && this.getAttribute("aria-selected") === "true") return true;
@@ -84,6 +86,9 @@ class FakeElement {
 }
 
 type BrowserHelpers = {
+  submissionIsConfirmed: (expectedJobId?: string) => boolean;
+  waitForSubmissionResult: (modal: FakeElement, timeoutMs: number, expectedJobId?: string) => Promise<boolean>;
+  driveEasyApply: (port: number, runId: number, jobId: number, item: { url: string }) => Promise<{ submitted?: boolean; ok: boolean }>;
   waitFor: <T>(predicate: () => T | Promise<T>, timeoutMs?: number, intervalMs?: number) => Promise<T>;
   jobIdFromValue: (value: string) => string;
   findEasyApplyButton: (scope: { querySelectorAll: () => FakeElement[] }) => FakeElement | null;
@@ -97,6 +102,18 @@ type BrowserHelpers = {
 };
 
 type AutofillHelpers = {
+  armResumeUpload: (port: number, jobId: number) => unknown;
+  checkArmedResumeUpload: () => Promise<void>;
+  disarmResumeUpload: (options?: { notifyBackground: boolean }) => void;
+  uploadResumeToVisibleFields: (options: { port: number; jobId: number; controls: [] }) => Promise<{ resumeUploaded: number; resumeUploadError: string | null }>;
+  updateFinalReviewMessage: () => void;
+  showAutomationMessage: (message: string, options?: { duration?: number }) => unknown;
+  findApplicationAction: () => { element: FakeElement; final: boolean; label: string } | null;
+  setFillRoot: (root: FakeElement | null) => void;
+  runAutomationStep: (options: {
+    port: number; jobId: number; questionsUnanswered: number; personalReview: string[];
+    settings: { auto_continue: boolean; pause_on_unknown: boolean; wait_seconds: number };
+  }) => Promise<{ state: string; continueHere?: boolean }>;
   personalReviewReasons: (entries?: Array<{ label: string }>) => string[];
   personalReviewReason: (reasons: string[]) => string;
   safetyPauseResult: (reasons: string[]) => { state: string; reasons: string[]; reason: string } | null;
@@ -119,9 +136,9 @@ type DashboardHandoffHelpers = {
   dashboardHandoffFromUrl: (value: string) => { jobId: number; port: number } | null;
 };
 
-function loadBrowserHelpers(): BrowserHelpers {
+function loadBrowserHelpers(runtimeOverrides: Record<string, unknown> = {}, windowOverrides: Record<string, unknown> = {}): BrowserHelpers {
   const source = fs.readFileSync(path.join(process.cwd(), "extension", "content-linkedin-run.js"), "utf8");
-  const windowObject: Record<string, unknown> = { __RT_LINKEDIN_RUN_TEST__: true };
+  const windowObject: Record<string, unknown> = { __RT_LINKEDIN_RUN_TEST__: true, ...windowOverrides };
   const context = vm.createContext({
     window: windowObject,
     document: {},
@@ -135,6 +152,7 @@ function loadBrowserHelpers(): BrowserHelpers {
     console,
     setTimeout,
     clearTimeout,
+    ...runtimeOverrides,
   });
   (windowObject as { getComputedStyle?: (element: FakeElement) => object }).getComputedStyle = (element) => element.computedStyle();
   vm.runInContext(source, context);
@@ -145,9 +163,10 @@ function loadAutofillHelpers(
   captchaElements: FakeElement[],
   uploadElements: FakeElement[] = [],
   documentOverride?: Record<string, unknown>,
+  runtimeOverrides: Record<string, unknown> = {},
 ): AutofillHelpers {
   const source = fs.readFileSync(path.join(process.cwd(), "extension", "content-autofill.js"), "utf8");
-  const windowObject: Record<string, unknown> = { __RT_AUTOFILL_TEST__: true };
+  const windowObject: Record<string, unknown> = { __RT_AUTOFILL_TEST__: true, location: runtimeOverrides.location || { hostname: "example.com" } };
   const documentObject = {
     querySelectorAll: (selector: string) => selector.includes("captcha") ? captchaElements : uploadElements,
   };
@@ -159,6 +178,7 @@ function loadAutofillHelpers(
     URL,
     URLSearchParams,
     console,
+    ...runtimeOverrides,
   });
   (windowObject as { getComputedStyle?: (element: FakeElement) => object }).getComputedStyle = (element) => element.computedStyle();
   vm.runInContext(source, context);
@@ -172,6 +192,299 @@ function loadDashboardHandoffHelpers(): DashboardHandoffHelpers {
   vm.runInContext(source, context);
   return windowObject.__rtLinkedInHandoffTest as DashboardHandoffHelpers;
 }
+
+test("autofill recognizes Review variants and independent button labels", () => {
+  const buttons = [
+    new FakeElement("Review"),
+    new FakeElement("Review", { ariaLabel: "Review your application" }),
+    new FakeElement("Review application"),
+    new FakeElement("Review your application"),
+    new FakeElement("  REVIEW \n application →  "),
+    new FakeElement("Check details", { ariaLabel: "  Review your application  " }),
+    Object.assign(new FakeElement("", { tagName: "INPUT" }), { value: "Review" }),
+    Object.assign(new FakeElement("Check details"), { title: "Review application" }),
+    new FakeElement("Next", { ariaLabel: "Continue to next step" }),
+    new FakeElement("Continue"),
+  ];
+  for (const button of buttons) {
+    const action = loadAutofillHelpers([], [button]).findApplicationAction();
+    assert.equal(action?.element, button);
+    assert.equal(action?.final, false);
+    assert.ok(action?.label.trim());
+  }
+  const unrelated = new FakeElement("Review company profile");
+  assert.equal(loadAutofillHelpers([], [unrelated]).findApplicationAction(), null);
+});
+
+test("autofill treats conflicting submission labels as final review", () => {
+  const buttons = [
+    new FakeElement("Submit application"),
+    new FakeElement("Review", { ariaLabel: "Submit application" }),
+    new FakeElement("Submit application", { ariaLabel: "Next" }),
+    Object.assign(new FakeElement("Review"), { value: "Submit application" }),
+    Object.assign(new FakeElement("Next"), { title: "Send application" }),
+  ];
+  for (const button of buttons) {
+    const action = loadAutofillHelpers([], [button]).findApplicationAction();
+    assert.equal(action?.element, button);
+    assert.equal(action?.final, true);
+    assert.match(action?.label || "", /^(Submit|Send) application$/);
+  }
+});
+
+test("autofill excludes hidden, disabled, extension, and out-of-scope actions", () => {
+  const hidden = new FakeElement("Review", { visible: false });
+  const disabled = Object.assign(new FakeElement("Review"), { disabled: true });
+  const ariaDisabled = new FakeElement("Review", { attributes: { "aria-disabled": "true" } });
+  const extensionPanel = Object.assign(new FakeElement("", { tagName: "DIV" }), { id: "rt-auto-progress" });
+  const extensionButton = Object.assign(new FakeElement("Next"), { parentElement: extensionPanel });
+  const ignored = [hidden, disabled, ariaDisabled, extensionButton];
+  assert.equal(loadAutofillHelpers([], ignored).findApplicationAction(), null);
+
+  const outside = new FakeElement("Next");
+  const inside = new FakeElement("Review");
+  const modal = new FakeElement("", { tagName: "DIV" });
+  modal.queryElements = [...ignored, inside];
+  const helpers = loadAutofillHelpers([], [outside]);
+  helpers.setFillRoot(modal);
+  assert.equal(helpers.findApplicationAction()?.element, inside);
+  modal.queryElements = [];
+  assert.equal(helpers.findApplicationAction(), null);
+});
+
+test("autofill prefers a separate continuation button over a final button", () => {
+  const submit = new FakeElement("Submit application");
+  const review = new FakeElement("Review");
+  const action = loadAutofillHelpers([], [submit, review]).findApplicationAction();
+  assert.equal(action?.element, review);
+  assert.equal(action?.final, false);
+});
+
+test("automation advances Next and Review, then pauses without clicking Submit", async () => {
+  // Exercise the real automation step with changing form controls and no network.
+  let step = 0;
+  const clicks: string[] = [];
+  const messages: string[] = [];
+  const buttons = ["Next", "Review", "Submit application"].map((label) =>
+    Object.assign(new FakeElement(label), {
+      click: () => { clicks.push(label); step++; },
+    })
+  );
+  const controls = ["contact", "resume", "summary"].map((name) =>
+    Object.assign(new FakeElement("", { tagName: "INPUT", ariaLabel: name }), { name })
+  );
+  const copy = { textContent: "" };
+  const cancel = { style: {}, onclick: null };
+  const panel = { querySelector: (selector: string) => selector === "#rt-auto-copy" ? copy : cancel };
+  const documentObject = {
+    getElementById: (id: string) => id === "rt-auto-progress" ? panel : null,
+    querySelectorAll: (selector: string) => {
+      if (selector.startsWith("button,")) return [buttons[step]];
+      if (selector.startsWith("input,")) return [controls[step]];
+      return [];
+    },
+  };
+  const helpers = loadAutofillHelpers([], [], documentObject, {
+    location: { pathname: "/jobs/search/", search: "", href: "https://www.linkedin.com/jobs/search/" },
+    setTimeout: (callback: () => void) => { callback(); return 0; },
+    chrome: { runtime: { sendMessage: (message: { type: string }, callback: (value: object) => void) => {
+      messages.push(message.type);
+      callback({ ok: true });
+    } } },
+  });
+  const options = {
+    port: 3000, jobId: 1, questionsUnanswered: 0, personalReview: [],
+    settings: { auto_continue: true, pause_on_unknown: true, wait_seconds: 0 },
+  };
+  for (let i = 0; i < 2; i++) {
+    const result = await helpers.runAutomationStep(options);
+    assert.equal(result.state, "next");
+    assert.equal(result.continueHere, true);
+  }
+  const final = await helpers.runAutomationStep(options);
+  assert.equal(final.state, "final-review");
+  assert.deepEqual(clicks, ["Next", "Review"]);
+  assert.equal(messages.at(-1), "CLEAR_AUTOFILL_SESSION");
+  assert.match(copy.textContent, /submit it yourself/);
+
+  // A conflicting visible Review label must also stop before any click.
+  buttons[2].innerText = "Review";
+  buttons[2].setAttribute("aria-label", "Submit application");
+  assert.equal((await helpers.runAutomationStep(options)).state, "final-review");
+  assert.deepEqual(clicks, ["Next", "Review"]);
+});
+
+function submissionFixture() {
+  const link = new FakeElement("See application Applied 7 seconds ago for Test Engineer", {
+    tagName: "A", attributes: { href: "/jobs-tracker?stage=applied" },
+  });
+  const title = Object.assign(new FakeElement("Test Engineer", { tagName: "A" }), {
+    href: "https://www.linkedin.com/jobs/view/4463908065/",
+  });
+  const state = { link: link as FakeElement | null, buttons: [] as FakeElement[], alerts: [] as FakeElement[], modalOpen: false };
+  const modal = new FakeElement("Apply to Matchtech", { tagName: "DIV" });
+  const location = { search: "?currentJobId=4463908065" };
+  const detail = {
+    querySelector: (selector: string) => selector === "#jobs-apply-see-application-link" ? state.link : selector.includes("h1 a") ? title : null,
+    querySelectorAll: () => state.buttons,
+  };
+  const document = {
+    querySelector: (selector: string) => selector === ".jobs-search__job-details" ? detail : null,
+    querySelectorAll: (selector: string) => selector.includes("jobs-easy-apply-modal") ? (state.modalOpen ? [modal] : []) : state.alerts,
+    contains: (element: unknown) => element === modal ? state.modalOpen : true,
+  };
+  return { link, title, state, modal, location, document };
+}
+
+test("LinkedIn recognizes the current applied-status link and legacy confirmations", () => {
+  const fixture = submissionFixture();
+  const helpers = loadBrowserHelpers({ document: fixture.document }, { location: fixture.location });
+  assert.equal(helpers.submissionIsConfirmed("4463908065"), true);
+  fixture.state.link = null;
+  fixture.state.buttons = [new FakeElement("Applied")];
+  assert.equal(helpers.submissionIsConfirmed("4463908065"), true);
+  fixture.state.buttons = [];
+  fixture.state.alerts = [new FakeElement("Your application was sent", { tagName: "DIV" })];
+  assert.equal(helpers.submissionIsConfirmed("4463908065"), true);
+});
+
+test("LinkedIn rejects hidden, saved, malformed, unrelated, or other-job status links", () => {
+  const fixture = submissionFixture();
+  const helpers = loadBrowserHelpers({ document: fixture.document }, { location: fixture.location });
+  for (const link of [
+    new FakeElement("See application Applied yesterday", { visible: false, attributes: { href: "/jobs-tracker?stage=applied" } }),
+    new FakeElement("See application Applied yesterday", { attributes: { href: "/jobs-tracker?stage=saved" } }),
+    new FakeElement("See application Applied yesterday", { attributes: { href: "https://example.com/jobs-tracker?stage=applied" } }),
+    new FakeElement("See application Applied yesterday", { attributes: { href: "http://[invalid" } }),
+    new FakeElement("See application Not Applied", { attributes: { href: "/jobs-tracker?stage=applied" } }),
+  ]) {
+    fixture.state.link = link;
+    assert.equal(helpers.submissionIsConfirmed("4463908065"), false);
+  }
+  fixture.state.link = fixture.link;
+  assert.equal(helpers.submissionIsConfirmed("999"), false);
+  fixture.title.href = "https://www.linkedin.com/jobs/view/999/";
+  assert.equal(helpers.submissionIsConfirmed("4463908065"), false);
+  fixture.state.link = null;
+  // A generic Applied label elsewhere on the page must not count.
+  fixture.state.alerts = [new FakeElement("Applied", { tagName: "DIV" })];
+  assert.equal(helpers.submissionIsConfirmed(), false);
+});
+
+test("submission watcher accepts delayed inline confirmation but not modal closure or job navigation", async () => {
+  for (const outcome of ["submitted", "closed", "navigated"]) {
+    const fixture = submissionFixture();
+    fixture.state.link = null;
+    let now = 10_000;
+    const helpers = loadBrowserHelpers({
+      document: fixture.document,
+      Date: { now: () => now },
+      setTimeout: (callback: () => void, delay: number) => {
+        now += delay;
+        if (now >= 10_800 && outcome !== "closed") fixture.state.link = fixture.link;
+        if (outcome === "navigated") fixture.location.search = "?currentJobId=999";
+        callback();
+      },
+    }, { location: fixture.location });
+    assert.equal(await helpers.waitForSubmissionResult(fixture.modal, 5000, "4463908065"), outcome === "submitted");
+  }
+});
+
+test("manual-review driver records Applied and removes stale instructions after the current LinkedIn confirmation", async () => {
+  const fixture = submissionFixture();
+  fixture.state.link = null;
+  const apply = Object.assign(new FakeElement("Easy Apply"), { click: () => { fixture.state.modalOpen = true; } });
+  fixture.state.buttons = [apply];
+  let removed = 0;
+  const requests: Array<{ path: string; body?: { status?: string } }> = [];
+  const panelControl = { style: {}, textContent: "", addEventListener: () => {} };
+  const panel = { style: {}, querySelector: () => panelControl };
+  const helpers = loadBrowserHelpers({
+    document: {
+      ...fixture.document,
+      createElement: () => panel,
+      body: { appendChild: () => {} },
+      getElementById: (id: string) => id === "rt-auto-progress" ? { remove: () => { removed++; } } : null,
+    },
+    chrome: { runtime: { sendMessage: (message: { path: string; body?: { status?: string } }, callback: (value: object) => void) => {
+      requests.push(message);
+      callback({ ok: true, data: {} });
+    } } },
+  }, {
+    location: fixture.location,
+    __rtAutoFill: {
+      armResumeUpload: () => {}, setFillRoot: () => {},
+      autoApply: async () => {
+        fixture.state.modalOpen = false;
+        fixture.state.link = fixture.link;
+        return { automation: { state: "final-review" } };
+      },
+    },
+  });
+  const result = await helpers.driveEasyApply(3000, 28, 106, { url: fixture.title.href });
+  assert.equal(result.submitted, true);
+  assert.equal(result.ok, true);
+  assert.equal(removed, 1);
+  assert.equal(requests.filter((request) => request.path === "/api/jobs/106" && request.body?.status === "applied").length, 1);
+});
+
+test("final-review banner expires with its submit control, without claiming successful submission", async () => {
+  const button = new FakeElement("Submit application");
+  let connected = true;
+  let removed = 0;
+  const copy = { textContent: "" };
+  const panel = { remove: () => { removed++; }, querySelector: (selector: string) => selector === "#rt-auto-copy" ? copy : { style: {} } };
+  const location = { href: "https://www.linkedin.com/jobs/search/?currentJobId=4463908065" };
+  const helpers = loadAutofillHelpers([], [], {
+    contains: () => connected,
+    getElementById: () => panel,
+    querySelectorAll: (selector: string) => selector.startsWith("button,") ? [button] : [],
+  }, {
+    location,
+    chrome: { runtime: { sendMessage: (_message: unknown, callback: (value: object) => void) => callback({ ok: true }) } },
+  });
+  const options = { port: 3000, jobId: 106, questionsUnanswered: 0, personalReview: [], settings: { auto_continue: true, pause_on_unknown: true, wait_seconds: 0 } };
+  await helpers.runAutomationStep(options);
+  helpers.updateFinalReviewMessage();
+  assert.equal(removed, 0);
+  button.disabled = true; // Temporary submission/validation locking isn't closure.
+  helpers.updateFinalReviewMessage();
+  assert.equal(removed, 0);
+  button.disabled = false;
+  connected = false; // Success and cancellation both remove the obsolete instruction.
+  helpers.updateFinalReviewMessage();
+  assert.equal(removed, 1);
+  assert.doesNotMatch(copy.textContent, /success|applied|submitted/i);
+  connected = true;
+  await helpers.runAutomationStep(options);
+  location.href = "https://www.linkedin.com/jobs/search/?currentJobId=999";
+  helpers.updateFinalReviewMessage();
+  assert.equal(removed, 2);
+  // A new personal-confirmation message must not inherit the final-review watcher.
+  await helpers.runAutomationStep(options);
+  helpers.showAutomationMessage("Paused for personal confirmation", { duration: 0 });
+  connected = false;
+  helpers.updateFinalReviewMessage();
+  assert.equal(removed, 2);
+});
+
+test("a previous message timer cannot remove a newer persistent review notice", () => {
+  const timers = new Map<number, () => void>();
+  const copy = { textContent: "" };
+  let removed = 0;
+  const panel = { remove: () => { removed++; }, querySelector: (selector: string) => selector === "#rt-auto-copy" ? copy : { style: {} } };
+  const helpers = loadAutofillHelpers([], [], { getElementById: () => panel }, {
+    setTimeout: (callback: () => void) => { timers.set(1, callback); return 1; },
+    clearTimeout: (id: number) => { timers.delete(id); },
+  });
+  helpers.showAutomationMessage("Opening Review…");
+  assert.equal(timers.size, 1);
+  helpers.showAutomationMessage("Review the application, then submit it yourself when ready.", { duration: 0 });
+  for (const callback of timers.values()) callback();
+  assert.equal(timers.size, 0);
+  assert.equal(removed, 0);
+  assert.match(copy.textContent, /submit it yourself/);
+});
 
 test("LinkedIn crawler waits for asynchronous predicates instead of accepting a Promise as success", async () => {
   const helpers = loadBrowserHelpers();
@@ -366,6 +679,103 @@ test("autofill accepts a visible selected résumé filename only after the requi
   });
 });
 
+test("LinkedIn probes hidden resume controls again after a non-resume step", async () => {
+  let calls = 0;
+  const helpers = loadAutofillHelpers([], [], undefined, {
+    location: { hostname: "www.linkedin.com", href: "https://www.linkedin.com/jobs/view/123", pathname: "/jobs/view/123", search: "" },
+    setTimeout, clearTimeout,
+    chrome: { runtime: { sendMessage: (message: { type: string }, callback: (value: object) => void) => {
+      assert.equal(message.type, "UPLOAD_RESUME_VIA_CDP");
+      calls++;
+      callback(calls === 1
+        ? { ok: false, stage: "accessibility_target", cdpStatus: "not_started" }
+        : { ok: false, stage: "validation", failure: { message: "Older resume is still selected" } });
+    } } },
+  });
+  const options = { port: 3000, jobId: 66, controls: [] as [] };
+  assert.equal((await helpers.uploadResumeToVisibleFields(options)).resumeUploadError, null);
+  assert.equal((await helpers.uploadResumeToVisibleFields(options)).resumeUploadError, "Older resume is still selected");
+  assert.equal((await helpers.uploadResumeToVisibleFields(options)).resumeUploadError, "Older resume is still selected");
+  assert.equal(calls, 2);
+});
+
+test("dashboard watcher uploads an AX-only resume after an AX-only contact step and stops polling", async () => {
+  let uploads = 0;
+  let intervalStarted = false;
+  let intervalStopped = false;
+  const copy = { textContent: "" };
+  const panel = { querySelector: (selector: string) => selector === "#rt-auto-copy" ? copy : { style: {} } };
+  const helpers = loadAutofillHelpers([], [], {
+    documentElement: {},
+    querySelectorAll: () => [],
+    getElementById: () => panel,
+  }, {
+    location: { hostname: "www.linkedin.com", href: "https://www.linkedin.com/jobs/view/123", pathname: "/jobs/view/123", search: "" },
+    sessionStorage: { setItem() {} },
+    MutationObserver: class { observe() {} disconnect() {} },
+    setTimeout: () => 1, clearTimeout() {},
+    setInterval: () => { intervalStarted = true; return 2; },
+    clearInterval: () => { intervalStopped = true; },
+    chrome: {
+      storage: { local: { set: async () => {} } },
+      runtime: { sendMessage: (message: { type: string }, callback: (value: object) => void) => {
+        if (message.type === "LOCAL_API") return callback({ ok: true, data: { resume_format: "docx" } });
+        assert.equal(message.type, "UPLOAD_RESUME_VIA_CDP");
+        uploads++;
+        callback(uploads === 1
+          ? { ok: false, stage: "accessibility_target", cdpStatus: "not_started" }
+          : { ok: true, filename: "Candidate-Resume-J66-123456789abc.docx" });
+      } },
+    },
+  });
+  helpers.armResumeUpload(3000, 66);
+  assert.equal(intervalStarted, true);
+  await helpers.checkArmedResumeUpload();
+  assert.equal(copy.textContent, "", "a probe miss must not report an upload");
+  assert.equal(intervalStopped, false);
+  await helpers.checkArmedResumeUpload();
+  assert.match(copy.textContent, /Verified selected résumé: Candidate-Resume-J66-123456789abc.docx/);
+  assert.equal(intervalStopped, true);
+  await helpers.checkArmedResumeUpload();
+  assert.equal(uploads, 2, "a successful upload must not be repeated");
+  helpers.disarmResumeUpload({ notifyBackground: false });
+});
+
+test("final review stops on an unverified attachment and displays the verified version only after a match", async () => {
+  const button = new FakeElement("Submit application");
+  const copy = { textContent: "" };
+  const panel = { querySelector: (selector: string) => selector === "#rt-auto-copy" ? copy : { style: {} } };
+  let verified = false;
+  const messages: string[] = [];
+  const helpers = loadAutofillHelpers([], [], {
+    getElementById: () => panel,
+    querySelectorAll: (selector: string) => selector.startsWith("button,") ? [button] : [],
+  }, {
+    location: { hostname: "www.linkedin.com", href: "https://www.linkedin.com/jobs/view/123", pathname: "/jobs/view/123", search: "" },
+    setTimeout, clearTimeout,
+    chrome: { runtime: { sendMessage: (message: { type: string }, callback: (value: object) => void) => {
+      messages.push(message.type);
+      callback(message.type !== "VERIFY_RESUME_SELECTION" || verified
+        ? { ok: true, filename: "Candidate-Resume-J66-123456789abc.docx" }
+        : { ok: false, failure: { message: "The older resume is selected" } });
+    } } },
+  });
+  const options = { port: 3000, jobId: 66, questionsUnanswered: 0, personalReview: [], settings: { auto_continue: true, pause_on_unknown: true, wait_seconds: 0 } };
+  assert.equal((await helpers.runAutomationStep(options)).state, "needs_manual");
+  assert.match(copy.textContent, /older resume is selected/);
+  verified = true;
+  assert.equal((await helpers.runAutomationStep(options)).state, "final-review");
+  assert.match(copy.textContent, /Verified attached résumé: Candidate-Resume-J66-123456789abc.docx/);
+  assert.equal(messages.filter((type) => type === "VERIFY_RESUME_SELECTION").length, 2);
+});
+
+test("autofill does not accept a merely visible unselected resume card", () => {
+  const helpers = loadAutofillHelpers([]);
+  const scope = new FakeElement("Resume", { tagName: "DIV" });
+  scope.queryElements = [new FakeElement("KshitijSharma-Resume.docx", { tagName: "DIV", classes: ["jobs-document-upload-redesign-card__container"] })];
+  assert.equal(helpers.selectedResumeFilenamePresent(scope, "KshitijSharma-Resume.docx"), false);
+});
+
 test("autofill memoizes unresolved CDP validation and never invokes a second upload", async () => {
   const helpers = loadAutofillHelpers([]);
   let attempts = 0;
@@ -486,6 +896,6 @@ test("LinkedIn background binds a crawler to its run ID and refuses unsafe inter
   assert.match(popup, /Clear Safe Pre-Upload Pause|clear-upload-pause-btn/);
   assert.doesNotMatch(popup, /Application submitted automatically/);
   const manifest = JSON.parse(fs.readFileSync(path.join(process.cwd(), "extension", "manifest.json"), "utf8"));
-  assert.equal(manifest.version, "3.6.1");
+  assert.equal(manifest.version, "3.6.7");
   assert.ok(manifest.permissions.includes("debugger"));
 });

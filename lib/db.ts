@@ -5,6 +5,7 @@ import { JobStatus, STATUS_CHECK_SQL } from "./job-status";
 import { shouldExpireLinkedInRun } from "./linkedin-run";
 
 const DB_PATH = path.join(process.cwd(), "data", "resume-tracker.db");
+const SUMMARY_TAILORING_RULE = "Tailor the summary to the role’s requirements using your relevant experience and skills. Do not mention the hiring company or include application-intent statements.";
 
 // Ensure data directory exists
 const dataDir = path.dirname(DB_PATH);
@@ -180,12 +181,18 @@ function initSchema(db: Database.Database) {
   db.exec("CREATE UNIQUE INDEX IF NOT EXISTS application_queue_pending_unique ON application_question_queue(normalized_question) WHERE status = 'pending'");
   seedPortals(db);
 
+  // Update the original default without overwriting user-customized rules.
+  db.prepare("UPDATE rules SET rule_text = ? WHERE rule_text = ?").run(
+    SUMMARY_TAILORING_RULE,
+    "Tailor the summary/objective to directly address the job description and company"
+  );
+
   // Seed default rules if none exist
   const count = (db.prepare("SELECT COUNT(*) as c FROM rules").get() as { c: number }).c;
   if (count === 0) {
     const insert = db.prepare("INSERT INTO rules (rule_text, priority, is_active) VALUES (?, ?, 1)");
     const defaults = [
-      ["Tailor the summary/objective to directly address the job description and company", 1],
+      [SUMMARY_TAILORING_RULE, 1],
       ["Emphasize skills and technologies that match the job requirements", 2],
       ["Quantify achievements with numbers and percentages wherever possible", 3],
       ["Use strong action verbs at the start of each bullet point", 4],

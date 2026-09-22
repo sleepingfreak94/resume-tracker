@@ -2,6 +2,21 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import vm from "node:vm";
+import { createHash, webcrypto } from "node:crypto";
+
+const expectedHash = createHash("sha256").update("# Tailored résumé").digest("hex");
+const expectedFilename = `KshitijSharma-Resume-J66-${expectedHash.slice(0, 12)}.docx`;
+
+function applicationTree(filename = expectedFilename, review = false) {
+  const names = review
+    ? [["heading", "Review your application"], ["heading", filename], ["button", "View document"], ["button", "Submit application"]]
+    : [["heading", filename], ["radio", `Deselect resume ${filename}`]];
+  const children = names.map(([role, name], index) => ({
+    nodeId: String(index + 2), ignored: false, role: { value: role }, name: { value: name },
+    properties: role === "radio" ? [{ name: "checked", value: { value: true } }] : [],
+  }));
+  return { nodes: [{ nodeId: "1", ignored: false, role: { value: "dialog" }, name: { value: "Apply to Example" }, childIds: children.map((node) => node.nodeId) }, ...children] };
+}
 import { test } from "node:test";
 
 class MockEvent {
@@ -33,7 +48,7 @@ function createChromeMock() {
   let downloadState: Record<string, unknown> = {
     id: 41,
     state: "complete",
-    filename: "/Users/test/Downloads/ResumeTracker/Uploads/66/KshitijSharma-Resume.docx",
+    filename: `/Users/test/Downloads/ResumeTracker/Uploads/66/${expectedFilename}`,
   };
   let attachImpl: () => Promise<void> = async () => {};
   let detachImpl: () => Promise<void> = async () => {};
@@ -41,6 +56,7 @@ function createChromeMock() {
   let emitChooser = true;
 
   const defaultCommand = async ({ target, method, params }: Command) => {
+    if (method === "Accessibility.getFullAXTree") return applicationTree();
     if (method === "DOM.getDocument") return { root: { nodeId: 1 } };
     if (method === "DOM.performSearch") return { searchId: "search-1", resultCount: 1 };
     if (method === "DOM.getSearchResults") return { nodeIds: [7] };
@@ -58,6 +74,7 @@ function createChromeMock() {
   };
 
   const chromeMock = {
+    tabs: { get: async () => ({ id: 17, url: "https://www.linkedin.com/jobs/view/123" }) },
     downloads: {
       onChanged: downloadChanged,
       download: async (options: Record<string, unknown>) => {
@@ -136,6 +153,7 @@ type UploadStatus = {
 };
 
 type Controller = {
+  verifySelection: (message: Record<string, unknown>, sender: Record<string, unknown>) => Promise<{ ok: boolean; filename?: string; failure?: { message: string } }>;
   upload: (message: Record<string, unknown>, sender: Record<string, unknown>) => Promise<UploadResponse>;
   getLatestStatus: (request: { tabId: number }) => Promise<UploadStatus | null>;
   clearLatestStatus: (request: { tabId: number }) => Promise<{ ok: boolean; cleared: boolean; failure?: { reason: string } }>;
@@ -144,13 +162,15 @@ type Controller = {
 type ResumeCdpModule = {
   CONTROLLER_VERSION: string;
   createResumeCdpController: (options: Record<string, unknown>) => Controller;
+  resumeContentHash: (content: string) => Promise<string>;
+  versionedResumeFilename: (profile: Record<string, string>, format: string, jobId: number, hash: string) => string;
 };
 
 function loadResumeCdpModule(): ResumeCdpModule {
   const source = fs.readFileSync(path.join(process.cwd(), "extension", "resume-cdp.js"), "utf8");
   const context = vm.createContext({
     console, setTimeout, clearTimeout, URL, Error, Promise, Math, Date,
-    AbortController, Response, Blob,
+    AbortController, Response, Blob, TextEncoder, crypto: webcrypto,
   });
   vm.runInContext(source, context);
   return (context as unknown as { ResumeTrackerCdp: ResumeCdpModule }).ResumeTrackerCdp;
@@ -161,6 +181,7 @@ function createFetchMock() {
   const fetchMock = async (input: URL | RequestInfo, init?: RequestInit) => {
     const url = String(input);
     calls.push({ url, init });
+    if (url.endsWith("/api/jobs/66")) return Response.json({ id: 66, job_link: "https://www.linkedin.com/jobs/view/123" });
     if (url.endsWith("/api/profile")) {
       return new Response(JSON.stringify({ first_name: "Kshitij", last_name: "Sharma" }), {
         headers: { "Content-Type": "application/json" },
@@ -223,6 +244,17 @@ const validMessage = {
 };
 const validSender = { frameId: 23, tab: { id: 17, url: "https://www.linkedin.com/jobs/view/123" } };
 
+test("upload names distinguish both jobs and regenerated content", async () => {
+  const resumeCdp = loadResumeCdpModule();
+  const profile = { first_name: "Kshitij", last_name: "Sharma" };
+  const hash = await resumeCdp.resumeContentHash("# Tailored résumé");
+  assert.equal(hash, expectedHash);
+  const first = resumeCdp.versionedResumeFilename(profile, "docx", 66, hash);
+  assert.equal(first, expectedFilename);
+  assert.notEqual(resumeCdp.versionedResumeFilename(profile, "docx", 67, hash), first);
+  assert.notEqual(resumeCdp.versionedResumeFilename(profile, "docx", 66, await resumeCdp.resumeContentHash("# Revised résumé")), first);
+});
+
 test("chooser-first CDP upload clicks the marked visible control and assigns one downloaded file", async () => {
   const chromeMock = createChromeMock();
   const stages: string[] = [];
@@ -236,13 +268,13 @@ test("chooser-first CDP upload clicks the marked visible control and assigns one
   });
   const result = await controller.upload(validMessage, validSender);
 
-  assert.equal(version, "3.6.1");
+  assert.equal(version, "3.6.7");
   assert.equal(result.ok, true);
   assert.equal(result.method, "chooser");
   assert.equal(result.cdpStatus, "validated");
-  assert.equal(result.filename, "KshitijSharma-Resume.docx");
+  assert.equal(result.filename, expectedFilename);
   assert.equal(chromeMock.state.downloads.length, 1);
-  assert.equal(chromeMock.state.downloads[0].filename, "ResumeTracker/Uploads/66/KshitijSharma-Resume.docx");
+  assert.equal(chromeMock.state.downloads[0].filename, `ResumeTracker/Uploads/66/${expectedFilename}`);
   assert.equal(chromeMock.state.downloads[0].conflictAction, "overwrite");
   assert.equal(fetchCalls.filter(({ url }) => url.endsWith("/api/resume/docx")).length, 1);
   assert.equal(validationDetails[0]?.frameId, 23);
@@ -252,6 +284,9 @@ test("chooser-first CDP upload clicks the marked visible control and assigns one
   assert.equal(query?.params.includeUserAgentShadowDOM, true);
   assert.ok(chromeMock.state.commands.some(({ method }) => method === "DOM.discardSearchResults"));
   const clicks = chromeMock.state.commands.filter(({ method }) => method === "Input.dispatchMouseEvent");
+  const scrollIndex = chromeMock.state.commands.findIndex(({ method }) => method === "DOM.scrollIntoViewIfNeeded");
+  const boundsIndex = chromeMock.state.commands.findIndex(({ method }) => method === "DOM.getBoxModel");
+  assert.ok(scrollIndex >= 0 && scrollIndex < boundsIndex);
   assert.deepEqual(clicks.map(({ params }) => [params.type, params.x, params.y]), [
     ["mousePressed", 200, 230],
     ["mouseReleased", 200, 230],
@@ -260,7 +295,7 @@ test("chooser-first CDP upload clicks the marked visible control and assigns one
   assert.equal(assignments.length, 1);
   assert.equal(assignments[0].params.backendNodeId, 91);
   assert.equal(assignments[0].params.nodeId, undefined);
-  assert.deepEqual(Array.from(assignments[0].params.files as string[]), ["/Users/test/Downloads/ResumeTracker/Uploads/66/KshitijSharma-Resume.docx"]);
+  assert.deepEqual(Array.from(assignments[0].params.files as string[]), [`/Users/test/Downloads/ResumeTracker/Uploads/66/${expectedFilename}`]);
   assert.deepEqual(
     chromeMock.state.commands.filter(({ method }) => method === "Page.setInterceptFileChooserDialog").map(({ params }) => params.enabled),
     [true, false],
@@ -274,21 +309,59 @@ test("chooser-first CDP upload clicks the marked visible control and assigns one
   assert.equal(chromeMock.state.debuggerDetach.listeners.size, 0);
 });
 
+test("upload worker refuses a different employer's tracked résumé before generation or download", async () => {
+  const chromeMock = createChromeMock();
+  const original = createFetchMock();
+  const { controller } = makeController(chromeMock, { fetchImpl: (async (input, init) => {
+    if (String(input).endsWith("/api/jobs/66")) return Response.json({ id: 66, job_link: "https://www.linkedin.com/jobs/view/999" });
+    return original.fetchMock(input, init);
+  }) as typeof fetch });
+  const result = await controller.upload(validMessage, validSender);
+  assert.equal(result.ok, false);
+  assert.equal(result.stage, "job_identity");
+  assert.equal(chromeMock.state.downloads.length, 0);
+  assert.equal(chromeMock.state.attachCalls, 0);
+  assert.equal(original.calls.length, 0);
+});
+
+test("upload worker rechecks the selected job before file assignment", async () => {
+  const chromeMock = createChromeMock();
+  let checks = 0;
+  chromeMock.tabs.get = async () => ({ id: 17, url: `https://www.linkedin.com/jobs/view/${++checks === 1 ? 123 : 999}` });
+  const { controller } = makeController(chromeMock);
+  const result = await controller.upload(validMessage, validSender);
+  assert.equal(result.ok, false);
+  assert.equal(result.stage, "job_identity");
+  assert.equal(chromeMock.state.commands.filter(({ method }) => method === "DOM.setFileInputFiles").length, 0);
+  assert.equal(chromeMock.state.detachCalls, 1);
+});
+
+test("a cached validated result is not reused after navigating to another job", async () => {
+  const chromeMock = createChromeMock();
+  const { controller } = makeController(chromeMock);
+  assert.equal((await controller.upload(validMessage, validSender)).ok, true);
+  chromeMock.tabs.get = async () => ({ id: 17, url: "https://www.linkedin.com/jobs/view/999" });
+  const result = await controller.upload(validMessage, validSender);
+  assert.equal(result.ok, false);
+  assert.equal(result.stage, "job_identity");
+  assert.equal(chromeMock.state.downloads.length, 1);
+});
+
 test("accessibility-targeted popup upload reaches LinkedIn's non-DOM résumé dialog and validates the selected card", async () => {
   const chromeMock = createChromeMock();
   let accessibilityCalls = 0;
   chromeMock.state.setCommandImpl(async (command) => {
     if (command.method === "Accessibility.getFullAXTree") {
       accessibilityCalls++;
-      if (accessibilityCalls === 1) {
+      if (accessibilityCalls <= 2) {
         return {
           nodes: [{ ignored: false, backendDOMNodeId: 501, role: { value: "button" }, name: { value: "Upload resume button. Only DOC, DOCX, PDF formats are supported." } }],
         };
       }
       return {
         nodes: [
-          { ignored: false, role: { value: "heading" }, name: { value: "KshitijSharma-Resume.docx" } },
-          { ignored: false, role: { value: "radio" }, name: { value: "Deselect resume KshitijSharma-Resume.docx" }, properties: [{ name: "checked", value: { value: true } }] },
+          { ignored: false, role: { value: "heading" }, name: { value: expectedFilename } },
+          { ignored: false, role: { value: "radio" }, name: { value: `Deselect resume ${expectedFilename}` }, properties: [{ name: "checked", value: { value: true } }] },
         ],
       };
     }
@@ -345,23 +418,23 @@ test("an uploaded but unselected DOCX card is clicked once and validated without
   chromeMock.state.setCommandImpl(async (command) => {
     if (command.method === "Accessibility.getFullAXTree") {
       accessibilityCalls++;
-      if (accessibilityCalls === 1) {
+      if (accessibilityCalls <= 2) {
         return {
           nodes: [{ ignored: false, backendDOMNodeId: 501, role: { value: "button" }, name: { value: "Upload resume button. Only DOC, DOCX, PDF formats are supported." } }],
         };
       }
-      if (accessibilityCalls === 2) {
+      if (accessibilityCalls === 3) {
         return {
           nodes: [
-            { ignored: false, role: { value: "heading" }, name: { value: "KshitijSharma-Resume.docx" } },
-            { ignored: false, backendDOMNodeId: 777, role: { value: "radio" }, name: { value: "Select resume KshitijSharma-Resume.docx" }, properties: [{ name: "checked", value: { value: false } }] },
+            { ignored: false, role: { value: "heading" }, name: { value: expectedFilename } },
+            { ignored: false, backendDOMNodeId: 777, role: { value: "radio" }, name: { value: `Select resume ${expectedFilename}` }, properties: [{ name: "checked", value: { value: false } }] },
           ],
         };
       }
       return {
         nodes: [
-          { ignored: false, role: { value: "heading" }, name: { value: "KshitijSharma-Resume.docx" } },
-          { ignored: false, backendDOMNodeId: 777, role: { value: "radio" }, name: { value: "Deselect resume KshitijSharma-Resume.docx" }, properties: [{ name: "checked", value: { value: true } }] },
+          { ignored: false, role: { value: "heading" }, name: { value: expectedFilename } },
+          { ignored: false, backendDOMNodeId: 777, role: { value: "radio" }, name: { value: `Deselect resume ${expectedFilename}` }, properties: [{ name: "checked", value: { value: true } }] },
         ],
       };
     }
@@ -406,7 +479,7 @@ test("unresolved LinkedIn validation persists across a service-worker restart an
   assert.equal(chromeMock.state.attachCalls, 1);
 });
 
-test("a validated attempt is idempotent after restart without another download or CDP command", async () => {
+test("a validated attempt rechecks selection after restart without another upload", async () => {
   const chromeMock = createChromeMock();
   const first = makeController(chromeMock).controller;
   const firstResult = await first.upload(validMessage, validSender);
@@ -417,7 +490,76 @@ test("a validated attempt is idempotent after restart without another download o
   assert.equal(secondResult.ok, true);
   assert.equal(secondResult.duplicatePrevented, true);
   assert.equal(chromeMock.state.downloads.length, 1);
+  assert.equal(chromeMock.state.attachCalls, 2);
+  assert.equal(chromeMock.state.commands.filter(({ method }) => method === "DOM.setFileInputFiles").length, 1);
+});
+
+test("final review rejects the old same-name resume and accepts only the generated version", async () => {
+  const chromeMock = createChromeMock();
+  const { controller } = makeController(chromeMock);
+  assert.equal((await controller.upload(validMessage, validSender)).ok, true);
+  let selectedFilename = "KshitijSharma-Resume.docx";
+  chromeMock.state.setCommandImpl(async (command) => command.method === "Accessibility.getFullAXTree"
+    ? applicationTree(selectedFilename, true) : chromeMock.state.defaultCommand(command));
+  assert.equal((await controller.verifySelection(validMessage, validSender)).ok, false);
+  selectedFilename = `Other-${expectedFilename}`;
+  assert.equal((await controller.verifySelection(validMessage, validSender)).ok, false);
+  selectedFilename = expectedFilename;
+  assert.equal((await controller.verifySelection(validMessage, validSender)).ok, true);
+  assert.equal(chromeMock.state.downloads.length, 1);
+});
+
+test("a cached upload cannot approve an older selected card after the user changes selection", async () => {
+  const chromeMock = createChromeMock();
+  const { controller } = makeController(chromeMock);
+  assert.equal((await controller.upload(validMessage, validSender)).ok, true);
+  chromeMock.state.setCommandImpl(async (command) => command.method === "Accessibility.getFullAXTree"
+    ? applicationTree("KshitijSharma-Resume.docx") : chromeMock.state.defaultCommand(command));
+  const repeated = await controller.upload(validMessage, validSender);
+  assert.equal(repeated.ok, false);
+  assert.equal(repeated.stage, "selection_verification");
+  assert.equal(chromeMock.state.downloads.length, 1);
+});
+
+test("regenerating the same job invalidates the uploaded version", async () => {
+  const chromeMock = createChromeMock();
+  const original = createFetchMock();
+  let changed = false;
+  const { controller } = makeController(chromeMock, { fetchImpl: (async (input, init) => {
+    if (changed && String(input).endsWith("/api/resume/tailored/66")) return Response.json({ exists: true, content: "# Updated résumé" });
+    return original.fetchMock(input, init);
+  }) as typeof fetch });
+  assert.equal((await controller.upload(validMessage, validSender)).ok, true);
+  changed = true;
+  const result = await controller.verifySelection(validMessage, validSender);
+  assert.equal(result.ok, false);
+  assert.match(result.failure?.message || "", /changed since upload/);
   assert.equal(chromeMock.state.attachCalls, 1);
+});
+
+test("upload validation cannot accept an older selected card while the generated file is absent", async () => {
+  const chromeMock = createChromeMock();
+  chromeMock.state.setCommandImpl(async (command) => command.method === "Accessibility.getFullAXTree" ? {
+    nodes: [
+      { ignored: false, backendDOMNodeId: 501, role: { value: "button" }, name: { value: "Upload resume" } },
+      ...applicationTree("KshitijSharma-Resume.docx").nodes,
+    ],
+  } : chromeMock.state.defaultCommand(command));
+  const { controller } = makeController(chromeMock);
+  const result = await controller.upload({ ...validMessage, targetToken: undefined }, validSender);
+  assert.equal(result.ok, false);
+  assert.equal(result.failure?.reason, "validation_unconfirmed");
+  assert.equal(chromeMock.state.commands.filter(({ method }) => method === "DOM.setFileInputFiles").length, 1);
+});
+
+test("matching file outside the active application cannot pass final review", async () => {
+  const chromeMock = createChromeMock();
+  const { controller } = makeController(chromeMock);
+  assert.equal((await controller.upload(validMessage, validSender)).ok, true);
+  chromeMock.state.setCommandImpl(async (command) => command.method === "Accessibility.getFullAXTree"
+    ? { nodes: applicationTree(expectedFilename, true).nodes.slice(1) }
+    : chromeMock.state.defaultCommand(command));
+  assert.equal((await controller.verifySelection(validMessage, validSender)).ok, false);
 });
 
 test("download interruption stops before debugger attach, cleans its listener, and permits explicit safe reset", async () => {

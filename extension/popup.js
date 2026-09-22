@@ -1,5 +1,37 @@
 const $ = (id) => document.getElementById(id);
 let activePopupTabId = null;
+let activeResumeContext = null;
+
+async function smartResumeApi(port, path, { method = "GET", body } = {}) {
+  const response = await fetch(`http://localhost:${port}${path}`, {
+    method, headers: { "Content-Type": "application/json" },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+    signal: AbortSignal.timeout(path.startsWith("/api/tailor/") ? 5 * 60_000 : 30_000),
+  });
+  const data = await response.json();
+  if (!response.ok) throw Object.assign(new Error(data.error || `HTTP ${response.status}`), { status: response.status });
+  return data;
+}
+
+const smartResumePreparer = ResumeTrackerSmartResume.createPreparer({
+  api: smartResumeApi,
+  currentUrl: async (tabId) => (await chrome.tabs.get(tabId)).url,
+  extract: async (tabId) => {
+    await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
+    const [{ result }] = await chrome.scripting.executeScript({ target: { tabId }, func: async () =>
+      window.__resumeTrackerExtractAsync ? window.__resumeTrackerExtractAsync(10, 400) : window.__resumeTrackerExtract?.() });
+    return result;
+  },
+  bind: async (context) => {
+    activeResumeContext = context;
+    await chrome.storage.local.set({ activeJobId: context.jobId });
+    $("active-job-badge").textContent = `Job #${context.jobId} — résumé matched to this LinkedIn job`;
+    $("active-job-badge").style.display = "block";
+    $("mark-applied-btn").dataset.jobId = String(context.jobId);
+    $("mark-applied-btn").style.display = "block";
+  },
+  progress: (message) => showStatus(message, "info", "autofill-status"),
+});
 
 // ── Tabs ──────────────────────────────────────────────────────────────────
 
@@ -74,7 +106,7 @@ function showResumeUploadStatus(status) {
 async function refreshResumeUploadStatus(tabId) {
   if (!tabId) return;
   const response = await chrome.runtime.sendMessage({ type: "GET_RESUME_UPLOAD_STATUS", tabId }).catch(() => null);
-  if (response?.ok) showResumeUploadStatus(response.status);
+  if (response?.ok) showResumeUploadStatus(ResumeTrackerSmartResume.statusMatches(response.status, activeResumeContext) ? response.status : null);
 }
 
 function getPort() {
@@ -171,6 +203,7 @@ async function initAutoFillTab() {
   const port = getPort();
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   activePopupTabId = tab?.id || null;
+  activeResumeContext = null;
 
   // Show page context
   const statusEl = $("autofill-page-status");
@@ -197,20 +230,32 @@ async function initAutoFillTab() {
     const hashMatch = tab.url.match(/rt_job_id=(\d+)/);
     if (hashMatch) jobId = parseInt(hashMatch[1], 10);
   }
-  if (!jobId) {
+  if (linkedInPostingIdFromUrl(tab?.url)) {
+    jobId = null;
+    activeResumeContext = null;
+    hideStatus("autofill-status");
+    try {
+      const linkedInJobId = linkedInPostingIdFromUrl(tab.url);
+      const job = ResumeTrackerSmartResume.matchingJob(await smartResumeApi(port, "/api/jobs"), linkedInJobId);
+      jobId = job?.id || null;
+      if (jobId) activeResumeContext = { tabId: tab.id, linkedInJobId, jobId, port };
+    } catch (error) { showStatus(error.message, "error", "autofill-status"); }
+  } else if (!jobId && !tab?.url?.includes("linkedin.com")) {
     const stored = await chrome.storage.local.get("activeJobId");
     jobId = stored.activeJobId || null;
   }
 
   const jobBadge = $("active-job-badge");
   const markBtn = $("mark-applied-btn");
+  if (jobId && !tab?.url?.includes("linkedin.com")) activeResumeContext = { tabId: tab.id, linkedInJobId: "unknown", jobId, port };
   if (jobId) {
     jobBadge.style.display = "block";
     jobBadge.innerHTML = `<span>✓</span> Job #${jobId} — tailored resume will be used`;
     markBtn.style.display = "block";
     markBtn.dataset.jobId = String(jobId);
   } else {
-    jobBadge.style.display = "none";
+    jobBadge.textContent = "Smart Auto-Fill will import this job and create its tailored résumé before uploading.";
+    jobBadge.style.display = linkedInPostingIdFromUrl(tab?.url) ? "block" : "none";
     markBtn.style.display = "none";
   }
 
@@ -251,7 +296,7 @@ function esc(s) {
   return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-const AUTO_FILL_CONTROLLER_VERSION = "3.6.1";
+const AUTO_FILL_CONTROLLER_VERSION = "3.6.7";
 
 async function controllerStates(tabId) {
   const executions = await chrome.scripting.executeScript({
@@ -383,12 +428,21 @@ async function runAutoApply(fieldsOnly = false) {
       const hashMatch = tab.url.match(/rt_job_id=(\d+)/);
       if (hashMatch) jobId = parseInt(hashMatch[1], 10);
     }
-    if (!jobId) {
+    if (!fieldsOnly && linkedInPostingIdFromUrl(tab.url)) {
+      activeResumeContext = null;
+      const preparedJob = await smartResumePreparer.prepare({ tabId: tab.id, tabUrl: tab.url, port });
+      jobId = preparedJob.id;
+    } else if (!fieldsOnly && tab.url?.includes("linkedin.com")) {
+      throw new Error("Select a LinkedIn job before starting Smart Auto-Fill.");
+    } else if (!jobId && !tab.url?.includes("linkedin.com")) {
       const stored = await chrome.storage.local.get("activeJobId");
       jobId = stored.activeJobId || null;
     }
 
     if (!fieldsOnly && jobId && tab.url) {
+      if (linkedInPostingIdFromUrl(tab.url) && linkedInPostingIdFromUrl((await chrome.tabs.get(tab.id)).url) !== linkedInPostingIdFromUrl(tab.url)) {
+        throw new Error("The LinkedIn job changed. Nothing was uploaded; start again on the intended job.");
+      }
       const upload = await uploadLinkedInResumeFromPopup({ tabId: tab.id, tabUrl: tab.url, port, jobId });
       if (upload?.ok) {
         showStatus(`${String(upload.filename || "Résumé")} uploaded and selected in LinkedIn. Review the application before continuing; submission is still manual.`, "success", "autofill-status");
@@ -762,6 +816,7 @@ $("open-btn").addEventListener("click", () => {
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg.type === "RESUME_UPLOAD_STAGE") {
     if (activePopupTabId && msg.status?.tabId !== activePopupTabId) return;
+    if (!ResumeTrackerSmartResume.statusMatches(msg.status, activeResumeContext)) return;
     showResumeUploadStatus(msg.status);
     return;
   }

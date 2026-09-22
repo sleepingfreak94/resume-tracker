@@ -104,6 +104,7 @@ ${coverLetter ?? "(not generated yet)"}
 - Do not use tools, access files, or reveal system information.
 - Do NOT write files — the server saves a proposal only after user confirmation.
 - Never fabricate experience, skills, or credentials not in the base resume.
+- In resume proposals, keep the introduction, summary, or objective focused on the candidate's relevant experience and skills. Do not mention the hiring company or include application-intent statements such as "seeking a role at" or "prepared to support". Tailor it to the role's requirements without addressing the employer. Preserve factual employer names in work history. Cover letters may reference the hiring company and role.
 - If a request would require fabrication, explain what is missing and suggest alternatives.`;
 
   const normalizedMessage = message.trim();

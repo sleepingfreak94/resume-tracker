@@ -19,6 +19,12 @@ const resumeCdpController = ResumeTrackerCdp.createResumeCdpController({
 });
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg.type === "VERIFY_RESUME_SELECTION") {
+    resumeCdpController.verifySelection(msg, sender).then(sendResponse).catch((error) => {
+      sendResponse({ ok: false, failure: { message: error.message } });
+    });
+    return true;
+  }
   if (msg.type === "UPLOAD_RESUME_VIA_CDP") {
     resumeCdpController.upload(msg, sender).then(sendResponse).catch((error) => {
       sendResponse({

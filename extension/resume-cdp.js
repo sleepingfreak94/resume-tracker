@@ -2,7 +2,7 @@
 (function initResumeCdpController(global) {
   const TARGET_ATTRIBUTE = "data-rt-cdp-upload-token";
   const PROTOCOL_VERSION = "1.3";
-  const CONTROLLER_VERSION = "3.6.1";
+  const CONTROLLER_VERSION = "3.6.7";
   const ATTEMPT_PREFIX = "resumeUploadAttempt_v35_";
   const LATEST_PREFIX = "resumeUploadLatest_v35_";
   const DEFAULT_TIMEOUTS = Object.freeze({
@@ -46,9 +46,50 @@
     return `${name ? `${name}-Resume` : "Resume"}.${format === "pdf" ? "pdf" : "docx"}`;
   }
 
+  async function resumeContentHash(content) {
+    const digest = await global.crypto.subtle.digest("SHA-256", new TextEncoder().encode(content));
+    return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+  }
+
+  function versionedResumeFilename(profile, format, jobId, hash) {
+    return profileResumeFilename(profile, format).replace(/\.(docx|pdf)$/, `-J${jobId}-${hash.slice(0, 12)}.$1`);
+  }
+
+  function hasExactFilename(text, filename) {
+    return String(text || "").toLowerCase().split(/\s+/).includes(String(filename || "").toLowerCase());
+  }
+
+  function applicationNodes(nodes) {
+    const visible = (nodes || []).filter((node) => !node?.ignored);
+    const dialogs = visible.filter((node) => accessibilityValue(node.role) === "dialog" && /^apply to\b/i.test(accessibilityValue(node.name)));
+    if (dialogs.length !== 1) return [];
+    const byId = new Map((nodes || []).map((node) => [node.nodeId, node]));
+    const result = [];
+    const visit = (node) => {
+      if (!node) return;
+      if (!node.ignored) result.push(node);
+      for (const id of node.childIds || []) visit(byId.get(id));
+    };
+    visit(dialogs[0]);
+    return result;
+  }
+
+  function accessibilityReviewState(nodes, filename) {
+    const scoped = applicationNodes(nodes);
+    const picker = accessibilityResumeState(scoped, filename);
+    const names = scoped.map((node) => accessibilityValue(node.name));
+    const headings = scoped.filter((node) => accessibilityValue(node.role) === "heading");
+    const files = headings.map((node) => accessibilityValue(node.name)).filter((name) => /\.(docx|pdf)$/i.test(name));
+    const finalReview = names.includes("Review your application") && names.includes("View document") &&
+      names.includes("Submit application") && files.length === 1 && files[0].toLowerCase() === filename.toLowerCase() &&
+      !scoped.some((node) => accessibilityValue(node.role) === "radio");
+    return { accepted: !picker.requiredErrorVisible && (picker.accepted || finalReview), filename };
+  }
+
   function linkedInJobIdFromSender(sender) {
     try {
       const url = new URL(String(sender?.tab?.url || ""));
+      if (!/(^|\.)linkedin\.com$/i.test(url.hostname)) return "unknown";
       const pathId = url.pathname.match(/\/jobs\/view\/(\d+)/i)?.[1];
       const queryId = url.searchParams.get("currentJobId");
       return pathId || (/^\d+$/.test(queryId || "") ? queryId : null) || "unknown";
@@ -214,10 +255,10 @@
     const wanted = String(filename || "").toLowerCase();
     const visibleNodes = (nodes || []).filter((node) => !node?.ignored);
     const names = visibleNodes.map((node) => accessibilityValue(node.name)).filter(Boolean);
-    const filenamePresent = Boolean(wanted) && names.some((name) => name.toLowerCase().includes(wanted));
+    const filenamePresent = Boolean(wanted) && names.some((name) => hasExactFilename(name, wanted));
     const selected = Boolean(wanted) && visibleNodes.some((node) => {
       const name = accessibilityValue(node.name).toLowerCase();
-      if (!name.includes(wanted)) return false;
+      if (!hasExactFilename(name, wanted)) return false;
       if (/\bdeselect\s+resume\b/i.test(name)) return true;
       return (node.properties || []).some((property) =>
         ["checked", "selected"].includes(String(property?.name || "")) &&
@@ -236,7 +277,7 @@
     return (nodes || []).find((node) => {
       if (node?.ignored || !Number.isInteger(node?.backendDOMNodeId) || node.backendDOMNodeId <= 0) return false;
       const name = accessibilityValue(node.name).toLowerCase();
-      return name.includes(wanted) && /\bselect\s+resume\b/i.test(name) && !/\bdeselect\s+resume\b/i.test(name);
+      return hasExactFilename(name, wanted) && /\bselect\s+resume\b/i.test(name) && !/\bdeselect\s+resume\b/i.test(name);
     }) || null;
   }
 
@@ -307,12 +348,23 @@
       return { ok: true, cleared: true };
     }
 
+    async function verifyUploadIdentity(request) {
+      if (!/^\d+$/.test(request.linkedInJobId)) return;
+      const failure = () => controllerError("input_not_found", "The current LinkedIn job does not match this tailored résumé. Start Smart Auto-Fill again on the intended job.", "job_identity");
+      const tab = await withTimeout(chromeApi.tabs.get(request.tabId), timeouts.fetch, failure, timers);
+      if (linkedInJobIdFromSender({ tab }) !== request.linkedInJobId) throw failure();
+      const response = await withTimeout(fetchImpl(`http://localhost:${request.port}/api/jobs/${request.jobId}`), timeouts.fetch, failure, timers);
+      if (!response.ok) throw failure();
+      const job = await withTimeout(response.json(), timeouts.fetch, failure, timers);
+      if (Number(job.id) !== request.jobId || linkedInJobIdFromSender({ tab: { url: job.job_link } }) !== request.linkedInJobId) throw failure();
+    }
+
     async function uploadInternal(request) {
       const deadline = Date.now() + timeouts.total;
       const storageKey = attemptKey(request);
       let status = {
         version: CONTROLLER_VERSION, storageKey, attemptId: request.attemptId,
-        tabId: request.tabId, frameId: request.frameId, linkedInJobId: request.linkedInJobId,
+        tabId: request.tabId, frameId: request.frameId, linkedInJobId: request.linkedInJobId, port: request.port,
         jobId: request.jobId, format: request.format, method: "chooser",
         targetMode: request.accessibilityTarget ? "accessibility" : "marked_dom",
         stage: "preparing", filename: null, downloadId: null,
@@ -358,9 +410,7 @@
           const response = await timedFetch(`http://localhost:${request.port}/api/profile`, undefined, timeouts.fetch, "profile_fetch");
           if (response.ok) profile = await response.json();
         } catch { /* use the safe fallback filename */ }
-        const filename = profileResumeFilename(profile, request.format);
-
-        await persist("fetching_tailored", { filename });
+        await persist("fetching_tailored");
         const tailoredResponse = await timedFetch(`http://localhost:${request.port}/api/resume/tailored/${request.jobId}`, undefined, timeouts.fetch, "tailored_fetch");
         if (!tailoredResponse.ok) throw controllerError("download_failed", `Could not load the job-specific résumé (HTTP ${tailoredResponse.status}).`, "tailored_fetch");
         const tailored = await withTimeout(
@@ -368,8 +418,9 @@
           () => controllerError("download_failed", "Timed out reading the job-specific résumé.", "tailored_fetch"), timers,
         );
         if (!tailored?.exists || !tailored.content) throw controllerError("download_failed", "A current job-specific tailored résumé is required for automated upload.", "tailored_fetch");
-
-        await persist("generating_document", { filename });
+        const contentHash = await resumeContentHash(tailored.content);
+        const filename = versionedResumeFilename(profile, request.format, request.jobId, contentHash);
+        await persist("generating_document", { filename, contentHash });
         const documentResponse = await timedFetch(`http://localhost:${request.port}/api/resume/${request.format}`, {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ content: tailored.content, filename }),
@@ -398,6 +449,7 @@
         await persist("waiting_for_download", { downloadId });
         const item = await waitForDownload(chromeApi, downloadId, boundedMs(timeouts.download, deadline), timers);
         const resolvedFilename = String(item.filename).split(/[\\/]/).pop() || filename;
+        if (resolvedFilename !== filename) throw controllerError("download_failed", "The downloaded résumé filename does not match the generated version.", "download_identity");
         await persist("downloaded", { filename: resolvedFilename, downloadId });
         return { filename: resolvedFilename, absolutePath: item.filename };
       }
@@ -487,6 +539,7 @@
       }
 
       async function clickCdpNode(params, stage) {
+        await command(debuggee, "DOM.scrollIntoViewIfNeeded", params, `${stage}_scroll`);
         const box = await command(debuggee, "DOM.getBoxModel", params, `${stage}_bounds`);
         const point = boxCenter(box?.model || box);
         await command(debuggee, "Input.dispatchMouseEvent", {
@@ -588,8 +641,10 @@
         interceptionEnabled = true;
 
         await persist("resolving_target");
+        // Generation can take long enough for LinkedIn to replace the picker.
+        if (request.accessibilityTarget) accessibilityTarget = await resolveAccessibilityTarget();
         const targetParams = request.accessibilityTarget
-          ? { backendNodeId: accessibilityTarget.backendDOMNodeId }
+          ? { backendNodeId: accessibilityTarget?.backendDOMNodeId }
           : { nodeId: await resolveMarkedTargetNode() };
         if (!targetParams.nodeId && !targetParams.backendNodeId) throw controllerError("input_not_found", "The marked visible résumé Upload control was not found across LinkedIn's application frames.", "target_query");
         chooser = waitForChooser(chromeApi, request.tabId, boundedMs(timeouts.chooser, deadline), timers, detachedPromise);
@@ -599,6 +654,9 @@
         chooser = null;
         if (!opened.params?.backendNodeId) throw controllerError("input_not_found", "The intercepted chooser did not identify LinkedIn's file input.", "chooser_opened", { ambiguous: true });
 
+        // Recheck after generation/download: the user may have switched jobs
+        // while the document was being prepared or the chooser was opening.
+        await verifyUploadIdentity(request);
         await persist("file_set_pending", { ambiguous: true, cdpStatus: "ambiguous" });
         await command(opened.source, "DOM.setFileInputFiles", {
           backendNodeId: opened.params.backendNodeId, files: [generated.absolutePath],
@@ -698,6 +756,53 @@
       return success;
     }
 
+    async function verifySelection(message, sender) {
+      let attached = false;
+      let finished = false;
+      let request;
+      try {
+        request = validateRequest(message, sender);
+        await verifyUploadIdentity(request);
+        const stored = await storageGet(attemptKey(request));
+        const status = stored?.[attemptKey(request)];
+        if (status?.stage !== "validated" || status.version !== CONTROLLER_VERSION || !status.contentHash || !status.fileSet) {
+          throw new Error("This application has no verified upload of the current generated résumé. Return to Resume and upload it before continuing.");
+        }
+        const timed = (promise) => withTimeout(promise, timeouts.fetch,
+          () => new Error("Résumé verification timed out. Do not submit until the attachment is checked."), timers);
+        const response = await timed(fetchImpl(`http://localhost:${request.port}/api/resume/tailored/${request.jobId}`));
+        if (!response.ok) throw new Error("Could not check the current generated résumé.");
+        const artifact = await timed(response.json());
+        if (!artifact?.exists || !artifact.content || await resumeContentHash(artifact.content) !== status.contentHash) {
+          throw new Error("The résumé has changed since upload. The attached version is out of date.");
+        }
+        const debuggee = { tabId: request.tabId };
+        await timed(chromeApi.debugger.attach(debuggee, PROTOCOL_VERSION).then(async () => {
+          if (finished) { await chromeApi.debugger.detach(debuggee).catch(() => {}); return; }
+          attached = true;
+        }));
+        await timed(chromeApi.debugger.sendCommand(debuggee, "Accessibility.enable", {}));
+        const tree = await timed(chromeApi.debugger.sendCommand(debuggee, "Accessibility.getFullAXTree", {}));
+        const selection = accessibilityReviewState(tree?.nodes, status.filename);
+        if (!selection.accepted) throw new Error(`The current application does not select ${status.filename}. An older or different résumé may be attached. Return to Resume to select the generated file.`);
+        // The user can navigate while the accessibility tree is being read.
+        await verifyUploadIdentity(request);
+        return { ok: true, accepted: true, filename: status.filename, stage: "selection_verified" };
+      } catch (error) {
+        return failure("validation_unconfirmed", errorMessage(error), { stage: "selection_verification" });
+      } finally {
+        finished = true;
+        if (attached) {
+          for (const action of [
+            () => chromeApi.debugger.sendCommand({ tabId: request.tabId }, "Accessibility.disable", {}),
+            () => chromeApi.debugger.detach({ tabId: request.tabId }),
+          ]) {
+            await withTimeout(Promise.resolve().then(action), timeouts.cleanup, () => new Error("Verification cleanup timed out"), timers).catch(() => {});
+          }
+        }
+      }
+    }
+
     async function upload(message, sender) {
       let request;
       try { request = validateRequest(message, sender); }
@@ -707,6 +812,10 @@
       const key = attemptKey(request);
       if (activeAttempts.has(key)) return activeAttempts.get(key);
       const attempt = (async () => {
+        try { await verifyUploadIdentity(request); }
+        catch (error) {
+          return failure("input_not_found", errorMessage(error), { stage: "job_identity", cdpStatus: "not_started", attemptId: request.attemptId });
+        }
         let existing;
         try {
           const stored = await storageGet(key);
@@ -717,6 +826,8 @@
           });
         }
         if (existing?.stage === "validated") {
+          const selection = await verifySelection(message, sender);
+          if (!selection.ok) return selection;
           return {
             ok: true, filename: existing.filename, method: "chooser", cdpStatus: "validated",
             stage: "validated", attemptId: existing.attemptId, failure: null, duplicatePrevented: true,
@@ -737,11 +848,11 @@
       finally { activeAttempts.delete(key); }
     }
 
-    return { upload, getLatestStatus, clearLatestStatus };
+    return { upload, verifySelection, getLatestStatus, clearLatestStatus };
   }
 
   global.ResumeTrackerCdp = {
     TARGET_ATTRIBUTE, CONTROLLER_VERSION, createResumeCdpController,
-    profileResumeFilename, validateRequest,
+    profileResumeFilename, validateRequest, versionedResumeFilename, resumeContentHash, accessibilityReviewState,
   };
 })(globalThis);

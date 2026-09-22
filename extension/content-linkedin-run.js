@@ -583,10 +583,29 @@
       .find((button) => isVisible(button) && !button.disabled && elementTextValues(button).some((text) => pattern.test(text))) || null;
   }
 
-  function submissionIsConfirmed() {
-    const detailButton = Array.from(getJobDetailPanel().querySelectorAll("button, [role='button']"))
+  function submissionIsConfirmed(expectedJobId = "") {
+    // Never attribute another job's confirmation to the application being watched.
+    if (expectedJobId && getCurrentJobId() !== expectedJobId) return false;
+    const detailPanel = getJobDetailPanel();
+    const titleLink = detailPanel.querySelector("h1 a[href*='/jobs/view/'], a.job-details-jobs-unified-top-card__job-title-link");
+    const detailJobId = jobIdFromValue(titleLink?.href);
+    if (expectedJobId && detailJobId && detailJobId !== expectedJobId) return false;
+
+    const detailButton = Array.from(detailPanel.querySelectorAll("button, [role='button']"))
       .find((button) => isVisible(button) && elementTextValues(button).some((text) => /^applied(?: to\b.*)?$/i.test(text)));
     if (detailButton) return true;
+
+    // Current LinkedIn renders a status link, not an Applied button. Scope this
+    // to the detail pane: Applied labels on other search results are not proof.
+    const applicationLink = detailPanel.querySelector("#jobs-apply-see-application-link");
+    if (applicationLink && isVisible(applicationLink)) {
+      try {
+        const href = new URL(applicationLink.getAttribute("href") || "", "https://www.linkedin.com");
+        if (href.origin === "https://www.linkedin.com" && href.pathname === "/jobs-tracker" &&
+            href.searchParams.get("stage") === "applied" &&
+            elementTextValues(applicationLink).some((text) => /^See application\s+Applied\b/i.test(text))) return true;
+      } catch { /* malformed links are not submission evidence */ }
+    }
 
     return Array.from(document.querySelectorAll("[role='dialog'], [role='alert'], .artdeco-toast-item, .artdeco-modal"))
       .filter(isVisible)
@@ -597,11 +616,12 @@
     return visibleDialogs().find((dialog) => /save (?:this )?application|discard (?:this )?application|unsaved/i.test(dialog.textContent || "")) || null;
   }
 
-  async function waitForSubmissionResult(modal, timeoutMs) {
+  async function waitForSubmissionResult(modal, timeoutMs, expectedJobId = getCurrentJobId()) {
     const deadline = Date.now() + timeoutMs;
     let closedAt = 0;
     while (Date.now() < deadline) {
-      if (submissionIsConfirmed()) return true;
+      if (expectedJobId && getCurrentJobId() !== expectedJobId) return false;
+      if (submissionIsConfirmed(expectedJobId)) return true;
       const applicationOpen = document.contains(modal) && isVisible(modal);
       const discardOpen = Boolean(saveApplicationDialog());
       if (!applicationOpen && !discardOpen) {
@@ -672,6 +692,7 @@
   }
 
   async function waitForUserResume(port, runId, jobId, state, detail = "", journalItem = null) {
+    const expectedJobId = jobIdFromValue(journalItem?.url) || getCurrentJobId();
     document.getElementById("rt-auto-progress")?.remove();
     const copy = userPauseCopy(state, detail);
     showMsg("Personal confirmation required", copy.panel);
@@ -717,7 +738,8 @@
       };
       const pollId = setInterval(() => {
         if (stopRequested) { finish("stopped"); return; }
-        if (submissionIsConfirmed()) { finish("submitted"); return; }
+        if (expectedJobId && getCurrentJobId() !== expectedJobId) { finish("closed"); return; }
+        if (submissionIsConfirmed(expectedJobId)) { finish("submitted"); return; }
         const activeModal = findActiveEasyApplyModal();
         if (!activeModal && !saveApplicationDialog()) {
           if (!closedAt) closedAt = Date.now();
@@ -732,6 +754,7 @@
   // ── Easy Apply modal driver ───────────────────────────────────────────────
 
   async function driveEasyApply(port, runId, jobId, journalItem) {
+    const expectedJobId = jobIdFromValue(journalItem?.url) || getCurrentJobId();
     const eaBtn = await waitForEasyApplyButton(12_000);
     if (!eaBtn) return { ok: false, note: "Easy Apply button not found" };
     eaBtn.click();
@@ -783,7 +806,7 @@
         const pausedForReview = result?.automation?.state === "final-review";
 
         if (submitClicked) {
-          submitted = await waitForSubmissionResult(modal, 20_000);
+          submitted = await waitForSubmissionResult(modal, 20_000, expectedJobId);
           if (!submitted) return { ok: false, paused: true, note: "Submit was clicked, but LinkedIn did not confirm the application; verify it manually before retrying" };
           await markJobApplied(port, jobId);
           return { ok: true, submitted: true, note: "Applied via Easy Apply" };
@@ -791,7 +814,7 @@
 
         if (pausedForReview) {
           showMsg("Review and submit this application in LinkedIn", "The run will continue after LinkedIn confirms submission.");
-          submitted = await waitForSubmissionResult(modal, 5 * 60_000);
+          submitted = await waitForSubmissionResult(modal, 5 * 60_000, expectedJobId);
           if (!submitted) return { ok: false, paused: true, note: "Final review closed or timed out without submission confirmation; verify it manually before retrying" };
           await markJobApplied(port, jobId);
           return { ok: true, submitted: true, note: "Applied via Easy Apply (manual review)" };
@@ -842,6 +865,7 @@
     } finally {
       window.__rtAutoFill.setFillRoot(null);
       hideResumeButton();
+      if (submitted) document.getElementById("rt-auto-progress")?.remove();
       if (!leaveOpenForReview) await closeEasyApplyDialogs(modal, submitted);
     }
   }
@@ -1101,7 +1125,7 @@
             method: "PATCH",
             body: { status: "stopped", note: `${jobData.company}: ${applyResult.note}` },
           });
-          showMsg(`Review needed for ${jobData.company}`, "The run stopped with the Easy Apply form left open.");
+          showMsg(`Review needed for ${jobData.company}`, applyResult.note || "Check the application in LinkedIn before retrying.");
           return;
         } else {
           showMsg(`⚠ ${jobData.company}: ${applyResult.note}`, `${totalProcessed} / ${maxJobs}`);
@@ -1202,6 +1226,9 @@
       isInactiveRunError,
       linkedInIsSignedIn,
       userPauseCopy,
+      submissionIsConfirmed,
+      waitForSubmissionResult,
+      driveEasyApply,
     };
     window.__rtLinkedInRunActive = false;
     return;

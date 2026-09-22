@@ -25,6 +25,7 @@ Critical constraints:
 - Only rearrange, rephrase, emphasize, or remove information present in BASE_RESUME.
 - Use ATS-friendly Markdown with standard headers and simple bullets. Do not use tables or columns.
 - Preserve employers in reverse-chronological order.
+- Keep the resume introduction, summary, or objective focused on the candidate's relevant experience and skills. Do not mention the hiring company or include application-intent statements such as "seeking a role at" or "prepared to support". Tailor it to the role's requirements without addressing the employer. Preserve factual employer names in work history; the hiring company may be named in tailoring notes.
 
 Job: ${ctx.jobTitle} at ${ctx.company}
 Job link: ${ctx.jobLink ?? "not supplied"}
