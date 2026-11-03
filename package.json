@@ -28,7 +28,7 @@
     "open-doc": "npx tsx scripts/open-doc.ts"
   },
   "dependencies": {
-    "@cursor/sdk": "^1.0.28",
+    "@cursor/sdk": "^1.2.0",
     "@openai/codex": "0.149.0",
     "@tailwindcss/typography": "^0.5.20",
     "@types/better-sqlite3": "^7.6.13",
