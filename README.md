@@ -3,7 +3,7 @@
 [![CI](https://github.com/sleepingfreak94/resume-tracker/actions/workflows/ci.yml/badge.svg)](https://github.com/sleepingfreak94/resume-tracker/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-A local-first job application tracker built with Next.js 16, React 19, SQLite, the OpenAI Responses API, ChatGPT-subscription Codex CLI, and optional Cursor Agent SDK compatibility. It tracks applications, tailors resumes, scores ATS alignment, generates cover letters, exports DOCX/PDF files, and includes a Chrome extension for importing and safely filling job applications.
+A local-first job application tracker built with Next.js 16, React 19, SQLite, the Claude Code CLI on a Claude subscription (the default provider), the OpenAI Responses API, ChatGPT-subscription Codex CLI, and optional Cursor Agent SDK compatibility. It tracks applications, tailors resumes, scores ATS alignment, generates cover letters, exports DOCX/PDF files, and includes a Chrome extension for importing and safely filling job applications.
 
 ## Features
 
@@ -25,7 +25,7 @@ A local-first job application tracker built with Next.js 16, React 19, SQLite, t
 
 - Node.js 20.9 or newer
 - npm
-- A ChatGPT subscription signed into Codex, an OpenAI API key, or a Cursor API key for AI features
+- The Claude Code CLI installed and signed in with a Claude subscription (default), or alternatively a ChatGPT subscription signed into Codex, an OpenAI API key, or a Cursor API key for AI features
 - Optional Google OAuth credentials for Drive uploads
 
 ## Setup
@@ -40,7 +40,9 @@ Open [http://localhost:3000](http://localhost:3000).
 
 If port 3000 is already in use, start on another loopback port, for example `npm run dev -- --port 3002`, and open the matching URL. LinkedIn runs pass this port to the extension automatically; the popup also shows whether its saved port is connected.
 
-Use **Settings** to choose the provider. For ChatGPT-subscription Codex, run `npm run codex:login`, complete the browser sign-in, then refresh the status card. Codex routes Sol/high to resumes and cover letters, Terra/high to document chat, and Luna/high to parsing, ATS analysis, and application answers. OpenAI uses the corresponding workload controls with `OPENAI_API_KEY`; Cursor uses `CURSOR_API_KEY`. The app never falls back between providers.
+Claude is the default provider. Install the Claude Code CLI, run `claude auth login` with a Claude subscription, and check it with `npm run claude:status`, then refresh the status card in **Settings**. Claude routes Opus/high to resumes and cover letters, Sonnet/high to document chat, and Haiku/high to parsing, ATS analysis, and application answers. API-key and third-party (Bedrock/Vertex) Claude authentication is refused, and no `ANTHROPIC_*` variables are passed to the CLI. Set `RESUME_TRACKER_CLAUDE_CLI` to an absolute path if `claude` is not on `PATH` (required on Windows).
+
+Use **Settings** to choose the provider; Codex, OpenAI, and Cursor remain selectable. For ChatGPT-subscription Codex, run `npm run codex:login`, complete the browser sign-in, then refresh the status card. Codex routes Sol/high to resumes and cover letters, Terra/high to document chat, and Luna/high to parsing, ATS analysis, and application answers. OpenAI uses the corresponding workload controls with `OPENAI_API_KEY`; Cursor uses `CURSOR_API_KEY`. The app never falls back between providers.
 
 API keys remain server-only and are never returned by the Settings API or included in backups. Resume-chat transcripts stay in browser local storage and are replayed with each request; OpenAI response storage is disabled. For Google Drive uploads, also configure `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and `GOOGLE_REDIRECT_URI`.
 
@@ -57,6 +59,7 @@ npm run check      # Run lint, typecheck, tests, and build
 npm run start      # Serve the production build
 npm run codex:login  # Sign Codex into ChatGPT
 npm run codex:status # Show the active Codex authentication method
+npm run claude:status # Show the active Claude Code authentication method (claude auth login to sign in)
 ```
 
 ## LinkedIn auto-apply runs
@@ -103,7 +106,7 @@ For a custom app port, enter it in **App port** in the popup and confirm that th
 
 The extension can import job details, match tracked jobs, download tailored resumes, autofill supported application forms, and use the selected server-side AI provider to answer open application questions from the saved profile, resume, tracked job, and confirmed answer library. Differently worded questions are grouped by normalized meaning and aliases; unanswered questions appear under **Answers** in the dashboard.
 
-The **Answers** page also controls multi-step automation: enable automatic Next/Continue, choose whether auto-apply attaches DOCX (the default) or PDF, set a 0–60 second delay, pause on unknown questions, and turn final review on or off. Every countdown has a visible pause button. Final review defaults to on. Certification, consent, signature, background-check, validation, and CAPTCHA gates always pause for personal confirmation. The extension never receives either provider API key; AI requests remain in the localhost server. Its localhost port can be changed in the popup.
+The **Answers** page also controls multi-step automation: enable automatic Next/Continue, choose whether auto-apply attaches DOCX (the default) or PDF, set a 0–60 second delay, pause on unknown questions, and turn final review on or off. Every countdown has a visible pause button. Final review defaults to on. Certification, consent, signature, background-check, validation, and CAPTCHA gates always pause for personal confirmation. The extension never receives any provider API key; AI requests remain in the localhost server. Its localhost port can be changed in the popup.
 
 For a first smoke test, use a one-job cap. Confirm that the tailored document is prepared and the LinkedIn modal reaches final review, then close it without submitting.
 
@@ -111,7 +114,7 @@ For stricter extension access, copy the extension ID from `chrome://extensions` 
 
 ## Security and backups
 
-The development and production commands bind to `127.0.0.1`. API requests reject non-loopback hosts and cross-origin web pages. AI generation receives resume/job text as untrusted data. Codex runs ephemerally in a fresh temporary directory with user config/rules ignored, read-only command sandboxing, approvals disabled, web search disabled, bounded output, and a sanitized environment; the server alone validates and writes generated files to known paths.
+The development and production commands bind to `127.0.0.1`. API requests reject non-loopback hosts and cross-origin web pages. AI generation receives resume/job text as untrusted data. Claude Code runs headless in a fresh temporary directory with every tool disabled, no MCP servers, no settings sources, no slash commands, no session persistence, permission prompts off, safe mode, bounded output, and an allow-listed environment that never includes `ANTHROPIC_*` or other secrets. Codex runs ephemerally in a fresh temporary directory with user config/rules ignored, read-only command sandboxing, approvals disabled, web search disabled, bounded output, and a sanitized environment; the server alone validates and writes generated files to known paths.
 
 Download a portable JSON backup from **My Profile → Download backup**. It includes jobs, activities, ATS scores, rules, portals, profile fields, non-secret AI preferences, and Markdown resumes. It deliberately excludes API keys, OAuth state, and Google tokens.
 
