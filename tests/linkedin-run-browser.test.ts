@@ -112,8 +112,8 @@ type AutofillHelpers = {
   setFillRoot: (root: FakeElement | null) => void;
   runAutomationStep: (options: {
     port: number; jobId: number; questionsUnanswered: number; personalReview: string[];
-    settings: { auto_continue: boolean; pause_on_unknown: boolean; wait_seconds: number };
-  }) => Promise<{ state: string; continueHere?: boolean }>;
+    settings: { auto_continue: boolean; pause_on_unknown: boolean; wait_seconds: number; require_tailored_resume?: boolean; resume_format?: string };
+  }) => Promise<{ state: string; continueHere?: boolean; reason?: string }>;
   personalReviewReasons: (entries?: Array<{ label: string }>) => string[];
   personalReviewReason: (reasons: string[]) => string;
   safetyPauseResult: (reasons: string[]) => { state: string; reasons: string[]; reason: string } | null;
@@ -130,6 +130,7 @@ type AutofillHelpers = {
   visibleResumeRequiredErrors: (scope: FakeElement) => FakeElement[];
   resumeAcceptanceState: (scope: FakeElement, filename: string) => { accepted: boolean; filenamePresent: boolean; requiredErrorVisible: boolean };
   runResumeUploadOnce: <T>(key: string, action: () => Promise<T> | T) => Promise<T>;
+  waitForArmedResumeUploadGate: (timeoutMs?: number) => Promise<{ ok: boolean; reason?: string }>;
 };
 
 type DashboardHandoffHelpers = {
@@ -767,6 +768,155 @@ test("final review stops on an unverified attachment and displays the verified v
   assert.equal((await helpers.runAutomationStep(options)).state, "final-review");
   assert.match(copy.textContent, /Verified attached résumé: Candidate-Resume-J66-123456789abc.docx/);
   assert.equal(messages.filter((type) => type === "VERIFY_RESUME_SELECTION").length, 2);
+});
+
+function armedLinkedInStepFixture(cdpResponse: Record<string, unknown>, { deferMs = 0, neverRespond = false } = {}) {
+  const events: string[] = [];
+  let step = 0;
+  const buttons = ["Next", "Review"].map((label) =>
+    Object.assign(new FakeElement(label), {
+      click: () => { events.push(`click:${label}`); step++; },
+    })
+  );
+  const controls = ["contact", "resume"].map((name) =>
+    Object.assign(new FakeElement("", { tagName: "INPUT", ariaLabel: name }), { name })
+  );
+  const copy = { textContent: "" };
+  const cancel = { style: {}, onclick: null };
+  const panel = {
+    remove: () => {},
+    querySelector: (selector: string) => selector === "#rt-auto-copy" ? copy : cancel,
+  };
+  const documentObject = {
+    documentElement: {},
+    getElementById: (id: string) => id === "rt-auto-progress" ? panel : panel,
+    querySelectorAll: (selector: string) => {
+      if (selector.startsWith("button,")) return [buttons[Math.min(step, buttons.length - 1)]];
+      if (selector.startsWith("input,")) return [controls[Math.min(step, controls.length - 1)]];
+      return [];
+    },
+  };
+  const helpers = loadAutofillHelpers([], [], documentObject, {
+    location: { hostname: "www.linkedin.com", href: "https://www.linkedin.com/jobs/view/123", pathname: "/jobs/view/123", search: "" },
+    sessionStorage: { setItem() {} },
+    MutationObserver: class { observe() {} disconnect() {} },
+    // Real timers so callbacks run as macrotasks; long safety timers must not hold the process open.
+    setTimeout: (callback: () => void, delay?: number) => {
+      const timer = setTimeout(callback, delay);
+      if ((delay ?? 0) >= 10_000) (timer as { unref?: () => void }).unref?.();
+      return timer;
+    },
+    clearTimeout,
+    setInterval: () => 1,
+    clearInterval: () => {},
+    chrome: {
+      storage: { local: { set: async () => {} } },
+      runtime: { sendMessage: (message: { type: string }, callback?: (value: object) => void) => {
+        if (message.type === "LOCAL_API") { callback?.({ ok: true, data: { resume_format: "docx" } }); return; }
+        if (message.type === "UPLOAD_RESUME_VIA_CDP") {
+          events.push("upload-start");
+          if (neverRespond) return;
+          setTimeout(() => { events.push("upload-done"); callback?.(cdpResponse); }, deferMs);
+          return;
+        }
+        callback?.({ ok: true });
+      } },
+    },
+  });
+  const stepOptions = (settings: { require_tailored_resume?: boolean } = {}) => ({
+    port: 3000, jobId: 66, questionsUnanswered: 0, personalReview: [] as string[],
+    settings: { auto_continue: true, pause_on_unknown: true, wait_seconds: 0, ...settings },
+  });
+  return { helpers, events, copy, stepOptions };
+}
+
+const failingUploadResponse = {
+  ok: false, stage: "validation", cdpStatus: "failed", failure: { message: "Older resume is still selected" },
+};
+const sleepMs = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+test("tailored-resume gate refuses to click Next after an armed upload fails", async () => {
+  const { helpers, events, copy, stepOptions } = armedLinkedInStepFixture(failingUploadResponse);
+  try {
+    helpers.armResumeUpload(3000, 66);
+    const result = await helpers.runAutomationStep(stepOptions({ require_tailored_resume: true }));
+    assert.equal(result.state, "needs_manual");
+    assert.match(result.reason || "", /Older resume is still selected/);
+    assert.ok(!events.includes("click:Next"));
+    assert.match(copy.textContent, /Résumé not uploaded/);
+  } finally {
+    helpers.disarmResumeUpload({ notifyBackground: false });
+  }
+});
+
+test("tailored-resume gate clicks Next only after the armed upload completes", async () => {
+  const { helpers, events, stepOptions } = armedLinkedInStepFixture(
+    { ok: true, filename: "Candidate-Resume-J66-123456789abc.docx" },
+    { deferMs: 20 },
+  );
+  try {
+    helpers.armResumeUpload(3000, 66);
+    const result = await helpers.runAutomationStep(stepOptions({ require_tailored_resume: true }));
+    assert.equal(result.state, "next");
+    assert.equal(events.filter((event) => event === "upload-start").length, 1);
+    assert.ok(events.includes("upload-done"));
+    assert.ok(events.includes("click:Next"));
+    assert.ok(events.indexOf("upload-done") < events.indexOf("click:Next"));
+  } finally {
+    helpers.disarmResumeUpload({ notifyBackground: false });
+  }
+});
+
+test("tailored-resume gate advances on a non-resume step probe miss", async () => {
+  const { helpers, events, stepOptions } = armedLinkedInStepFixture(
+    { ok: false, stage: "accessibility_target", cdpStatus: "not_started" },
+  );
+  try {
+    helpers.armResumeUpload(3000, 66);
+    const result = await helpers.runAutomationStep(stepOptions({ require_tailored_resume: true }));
+    assert.equal(result.state, "next");
+    assert.ok(events.includes("click:Next"));
+    assert.ok(events.filter((event) => event === "upload-start").length >= 1);
+  } finally {
+    helpers.disarmResumeUpload({ notifyBackground: false });
+  }
+});
+
+test("without require_tailored_resume the gate is inert", async () => {
+  const failing = armedLinkedInStepFixture(failingUploadResponse);
+  try {
+    failing.helpers.armResumeUpload(3000, 66);
+    for (let i = 0; i < 100 && !failing.events.includes("upload-done"); i++) await sleepMs(10);
+    await sleepMs(20);
+    assert.ok(failing.events.includes("upload-done"));
+    const result = await failing.helpers.runAutomationStep(failing.stepOptions());
+    assert.equal(result.state, "next");
+    assert.ok(failing.events.includes("click:Next"));
+  } finally {
+    failing.helpers.disarmResumeUpload({ notifyBackground: false });
+  }
+
+  // Nothing armed: the flag alone must not block the step.
+  const unarmed = armedLinkedInStepFixture(failingUploadResponse);
+  const unarmedResult = await unarmed.helpers.runAutomationStep(unarmed.stepOptions({ require_tailored_resume: true }));
+  assert.equal(unarmedResult.state, "next");
+  assert.ok(unarmed.events.includes("click:Next"));
+  assert.ok(!unarmed.events.includes("upload-start"));
+});
+
+test("tailored-resume gate stops at its bound while an upload is still in flight", async () => {
+  const { helpers, events } = armedLinkedInStepFixture({ ok: true }, { neverRespond: true });
+  try {
+    helpers.armResumeUpload(3000, 66);
+    for (let i = 0; i < 100 && !events.includes("upload-start"); i++) await sleepMs(10);
+    assert.equal(events.filter((event) => event === "upload-start").length, 1);
+    const gate = await helpers.waitForArmedResumeUploadGate(50);
+    assert.equal(gate.ok, false);
+    assert.match(gate.reason || "", /still in progress/);
+    assert.equal(events.filter((event) => event === "upload-start").length, 1);
+  } finally {
+    helpers.disarmResumeUpload({ notifyBackground: false });
+  }
 });
 
 test("autofill does not accept a merely visible unselected resume card", () => {
