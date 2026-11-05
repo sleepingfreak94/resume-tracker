@@ -99,6 +99,13 @@ type BrowserHelpers = {
   isRelevantLinkedInSearchResult: (title: string, keywords: string) => boolean;
   isInactiveRunError: (error: unknown) => boolean;
   userPauseCopy: (state: string, detail?: string) => { panel: string; checkpoint: string; note: string };
+  getJobCards: () => TreeElement[];
+  getCardJobId: (card: FakeElement) => string;
+  getCardTitle: (card: FakeElement) => string;
+  getJobDetailPanel: () => TreeElement;
+  getDetailSignature: () => string;
+  findCurrentEasyApplyButton: () => FakeElement | null;
+  findCurrentExternalApplyButton: () => FakeElement | null;
 };
 
 type AutofillHelpers = {
@@ -1048,4 +1055,362 @@ test("LinkedIn background binds a crawler to its run ID and refuses unsafe inter
   const manifest = JSON.parse(fs.readFileSync(path.join(process.cwd(), "extension", "manifest.json"), "utf8"));
   assert.equal(manifest.version, "3.6.7");
   assert.ok(manifest.permissions.includes("debugger"));
+});
+
+// ── Tree-backed fake DOM for LinkedIn's current search-results layout ─────
+
+type SelectorCompound = { tag?: string; classes: string[]; attrs: Array<{ name: string; op: string; value: string }> };
+type SelectorStep = { combinator: "" | " " | ">"; compound: SelectorCompound };
+
+function splitSelectorList(selector: string): string[] {
+  const parts: string[] = [];
+  let current = "";
+  let depth = 0;
+  let quote = "";
+  for (const char of selector) {
+    if (quote) {
+      if (char === quote) quote = "";
+    } else if (char === "'" || char === "\"") {
+      quote = char;
+    } else if (char === "[") {
+      depth++;
+    } else if (char === "]") {
+      depth--;
+    } else if (char === "," && depth === 0) {
+      parts.push(current);
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+  parts.push(current);
+  return parts;
+}
+
+function parseSelectorCompound(text: string): SelectorCompound | null {
+  const compound: SelectorCompound = { classes: [], attrs: [] };
+  let rest = text;
+  const tag = rest.match(/^(?:[a-zA-Z][a-zA-Z0-9-]*|\*)/);
+  if (tag) {
+    if (tag[0] !== "*") compound.tag = tag[0].toUpperCase();
+    rest = rest.slice(tag[0].length);
+  }
+  while (rest) {
+    const classMatch = rest.match(/^\.([\w-]+)/);
+    if (classMatch) {
+      compound.classes.push(classMatch[1]);
+      rest = rest.slice(classMatch[0].length);
+      continue;
+    }
+    const attrMatch = rest.match(/^\[\s*([\w-]+)\s*(?:([\^*$~|]?=)\s*(?:'([^']*)'|"([^"]*)"|([^\]]*?)))?\s*\]/);
+    if (!attrMatch) return null;
+    compound.attrs.push({
+      name: attrMatch[1],
+      op: attrMatch[2] ?? "",
+      value: attrMatch[3] ?? attrMatch[4] ?? attrMatch[5] ?? "",
+    });
+    rest = rest.slice(attrMatch[0].length);
+  }
+  return compound;
+}
+
+function parseComplexSelector(text: string): SelectorStep[] | null {
+  const steps: SelectorStep[] = [];
+  let combinator: "" | " " | ">" = "";
+  let i = 0;
+  while (i < text.length) {
+    const char = text[i];
+    if (char === " " || char === "\n" || char === "\t") {
+      i++;
+      if (steps.length && !combinator) combinator = " ";
+      continue;
+    }
+    if (char === ">") {
+      combinator = ">";
+      i++;
+      continue;
+    }
+    let j = i;
+    let depth = 0;
+    let quote = "";
+    while (j < text.length) {
+      const c = text[j];
+      if (quote) {
+        if (c === quote) quote = "";
+      } else if (c === "'" || c === "\"") {
+        quote = c;
+      } else if (c === "[") {
+        depth++;
+      } else if (c === "]") {
+        depth--;
+      } else if (depth === 0 && (c === " " || c === ">" || c === "\n" || c === "\t")) {
+        break;
+      }
+      j++;
+    }
+    const compound = parseSelectorCompound(text.slice(i, j));
+    if (!compound) return null;
+    steps.push({ combinator: steps.length ? (combinator || " ") : "", compound });
+    combinator = "";
+    i = j;
+  }
+  return steps.length ? steps : null;
+}
+
+// Returns null for any selector this tiny matcher cannot parse (it then matches nothing).
+function parseSelector(selector: string): SelectorStep[][] | null {
+  const alternatives: SelectorStep[][] = [];
+  for (const part of splitSelectorList(selector)) {
+    const steps = parseComplexSelector(part.trim());
+    if (!steps) return null;
+    alternatives.push(steps);
+  }
+  return alternatives;
+}
+
+function matchSelectorCompound(element: FakeElement, compound: SelectorCompound): boolean {
+  if (compound.tag && element.tagName.toUpperCase() !== compound.tag) return false;
+  if (!compound.classes.every((name) => element.classList.includes(name))) return false;
+  return compound.attrs.every(({ name, op, value }) => {
+    const actual = name === "class" ? element.classList.join(" ") : element.getAttribute(name);
+    if (actual === null) return false;
+    if (op === "") return true;
+    if (op === "=") return actual === value;
+    if (op === "^=") return actual.startsWith(value);
+    if (op === "*=") return actual.includes(value);
+    return false;
+  });
+}
+
+function matchSelectorSteps(element: FakeElement, steps: SelectorStep[], index: number): boolean {
+  const step = steps[index];
+  if (!matchSelectorCompound(element, step.compound)) return false;
+  if (index === 0) return true;
+  if (step.combinator === ">") {
+    return Boolean(element.parentElement) && matchSelectorSteps(element.parentElement as FakeElement, steps, index - 1);
+  }
+  for (let ancestor = element.parentElement; ancestor; ancestor = ancestor.parentElement) {
+    if (matchSelectorSteps(ancestor, steps, index - 1)) return true;
+  }
+  return false;
+}
+
+function matchesAnySelector(element: FakeElement, alternatives: SelectorStep[][]): boolean {
+  return alternatives.some((steps) => matchSelectorSteps(element, steps, steps.length - 1));
+}
+
+class TreeElement extends FakeElement {
+  children: TreeElement[] = [];
+
+  get href(): string {
+    return this.getAttribute("href") ?? "";
+  }
+
+  appendChild(child: TreeElement) {
+    child.parentElement = this;
+    this.children.push(child);
+    return child;
+  }
+
+  matches(selector: string) {
+    const alternatives = parseSelector(selector);
+    return Boolean(alternatives && matchesAnySelector(this, alternatives));
+  }
+
+  querySelectorAll(selector = ""): TreeElement[] {
+    const alternatives = parseSelector(selector);
+    if (!alternatives) return [];
+    const found: TreeElement[] = [];
+    const visit = (node: TreeElement) => {
+      for (const child of node.children) {
+        if (matchesAnySelector(child, alternatives)) found.push(child);
+        visit(child);
+      }
+    };
+    visit(this);
+    return found;
+  }
+
+  querySelector(selector = ""): TreeElement | null {
+    return this.querySelectorAll(selector)[0] ?? null;
+  }
+
+  closest(selector: string): TreeElement | null {
+    let current: TreeElement | null = this;
+    while (current) {
+      if (current.matches(selector)) return current;
+      current = current.parentElement as TreeElement | null;
+    }
+    return null;
+  }
+}
+
+type TreeNodeOptions = { text?: string; attributes?: Record<string, string>; classes?: string[]; children?: TreeElement[] };
+
+function treeNode(tagName: string, { text = "", attributes = {}, classes = [], children = [] }: TreeNodeOptions = {}) {
+  const element = new TreeElement(text, { tagName, attributes, classes });
+  for (const child of children) element.appendChild(child);
+  return element;
+}
+
+function buildDocument(content: TreeElement) {
+  const body = treeNode("BODY", { children: [content] });
+  const documentElement = treeNode("HTML", { children: [body] });
+  return {
+    body,
+    documentElement,
+    querySelector: (selector: string) => documentElement.querySelector(selector),
+    querySelectorAll: (selector: string) => documentElement.querySelectorAll(selector),
+    contains: (element: TreeElement) => {
+      for (let current: TreeElement | null = element; current; current = current.parentElement as TreeElement | null) {
+        if (current === documentElement) return true;
+      }
+      return false;
+    },
+  };
+}
+
+const CARD_KEY_SELECTOR = "[componentkey^='job-card-component-ref-']";
+const asScope = (value: unknown) => value as { querySelectorAll: () => FakeElement[] };
+
+function currentLayoutCard(jobId: string, text: string, extra: Record<string, string> = {}) {
+  const key = `job-card-component-ref-${jobId}`;
+  const card = treeNode("DIV", { text, attributes: { role: "button", tabindex: "0", componentkey: key, ...extra } });
+  const wrapper = treeNode("DIV", { text, attributes: { componentkey: key }, children: [card] });
+  return { card, wrapper };
+}
+
+function currentLayoutFixture(paneKind: "easy" | "external" | "none" = "easy") {
+  const first = currentLayoutCard("4485201787", "Selected, Senior QA Engineer (Verified job)\nAcme\nEasy Apply");
+  const second = currentLayoutCard("4485209999", "QA Analyst\nBeta\nEasy Apply", { "data-job-id": "4485209999" });
+  const list = treeNode("DIV", { children: [first.wrapper, second.wrapper] });
+  const main = treeNode("MAIN", { children: [list] });
+  const link = treeNode("A", {
+    text: "Senior QA Engineer",
+    attributes: { href: "https://www.linkedin.com/jobs/view/4485201787/" },
+  });
+  const apply = paneKind === "external"
+    ? treeNode("A", { text: "Apply", attributes: { "aria-label": "Apply on company website", target: "_blank" } })
+    : treeNode("BUTTON", { text: "Easy Apply", attributes: { "aria-label": "Easy Apply to this job" } });
+  let pane: TreeElement | null = null;
+  if (paneKind !== "none") {
+    pane = treeNode("SECTION", { children: [treeNode("DIV", { children: [link, apply] })] });
+    main.appendChild(pane);
+  }
+  const doc = buildDocument(main);
+  return { first, second, main, pane, link, apply, doc, helpers: loadBrowserHelpers({ document: doc }) };
+}
+
+test("current layout cards are found by componentkey with ids and cleaned titles", () => {
+  const fx = currentLayoutFixture("easy");
+  const cards = [...fx.helpers.getJobCards()];
+  assert.equal(cards.length, 2);
+  assert.equal(cards[0], fx.first.card);
+  assert.equal(cards[1], fx.second.card);
+  assert.ok(!cards.includes(fx.first.wrapper));
+  assert.ok(!cards.includes(fx.second.wrapper));
+  assert.equal(new Set(cards).size, 2);
+  assert.equal(fx.helpers.getCardJobId(fx.first.card), "4485201787");
+  assert.equal(fx.helpers.getCardJobId(fx.second.card), "4485209999");
+  assert.equal(fx.helpers.getCardTitle(fx.first.card), "Senior QA Engineer");
+  assert.equal(fx.helpers.getCardTitle(fx.second.card), "QA Analyst");
+});
+
+test("current layout detail pane excludes the list", () => {
+  const fx = currentLayoutFixture("easy");
+  const panel = fx.helpers.getJobDetailPanel();
+  assert.equal(panel, fx.pane);
+  assert.notEqual(panel, fx.main);
+  assert.equal(panel.querySelector("a[href*='/jobs/view/']"), fx.link);
+  assert.equal(panel.querySelector("button"), fx.apply);
+  assert.equal(panel.querySelectorAll(CARD_KEY_SELECTOR).length, 0);
+  assert.equal(panel.closest(CARD_KEY_SELECTOR), null);
+});
+
+test("list-card Easy Apply labels are never returned as the Apply control", () => {
+  // Easy Apply job: the list cards come first in document order and also say Easy Apply.
+  const easy = currentLayoutFixture("easy");
+  assert.equal(easy.main.querySelectorAll("button, a, [role='button']")[0], easy.first.card);
+  assert.equal(easy.helpers.findCurrentEasyApplyButton(), easy.apply);
+  assert.equal(easy.helpers.findEasyApplyButton(asScope(easy.main)), easy.apply);
+  assert.equal(easy.helpers.findEasyApplyButton(asScope(easy.doc)), easy.apply);
+  assert.equal(easy.helpers.findCurrentExternalApplyButton(), null);
+
+  // External-only job: the pane has only an Apply anchor, yet the list cards say Easy Apply.
+  const external = currentLayoutFixture("external");
+  assert.equal(external.helpers.findCurrentEasyApplyButton(), null);
+  assert.equal(external.helpers.findEasyApplyButton(asScope(external.doc)), null);
+  assert.equal(external.helpers.findEasyApplyButton(asScope(external.main)), null);
+  assert.equal(external.helpers.findCurrentExternalApplyButton(), external.apply);
+  assert.equal(external.helpers.findExternalApplyButton(asScope(external.main)), external.apply);
+
+  // No title link: the pane resolves to main and still never yields a card.
+  const none = currentLayoutFixture("none");
+  assert.equal(none.helpers.getJobDetailPanel(), none.main);
+  assert.equal(none.helpers.findCurrentEasyApplyButton(), null);
+  assert.equal(none.helpers.findCurrentExternalApplyButton(), null);
+  assert.equal(none.helpers.findEasyApplyButton(asScope(none.doc)), null);
+  assert.equal(none.helpers.findExternalApplyButton(asScope(none.doc)), null);
+});
+
+test("current layout detail signature changes between two jobs without an h1", () => {
+  const fx = currentLayoutFixture("easy");
+  assert.equal(fx.doc.querySelector("h1"), null);
+  const signatureA = fx.helpers.getDetailSignature();
+  assert.ok(signatureA.includes("4485201787"));
+
+  // Same action labels; only the title link text and job id change.
+  fx.link.innerText = "QA Analyst";
+  fx.link.textContent = "QA Analyst";
+  fx.link.setAttribute("href", "https://www.linkedin.com/jobs/view/4485209999/");
+  const signatureB = fx.helpers.getDetailSignature();
+  assert.ok(signatureB.includes("4485209999"));
+  assert.notEqual(signatureA, signatureB);
+
+  // The job id alone must also be enough to notice a switch.
+  fx.link.innerText = "Senior QA Engineer";
+  fx.link.textContent = "Senior QA Engineer";
+  const signatureC = fx.helpers.getDetailSignature();
+  assert.equal(signatureC, signatureA.replace("4485201787", "4485209999"));
+  assert.notEqual(signatureC, signatureA);
+});
+
+test("old search layout selectors and behavior are unchanged", () => {
+  const link1 = treeNode("A", {
+    text: "Functional Test Engineer",
+    attributes: { href: "https://www.linkedin.com/jobs/view/functional-test-engineer-4400000001/" },
+  });
+  const link2 = treeNode("A", {
+    text: "Senior QA Engineer",
+    attributes: { href: "https://www.linkedin.com/jobs/view/senior-qa-4400000002/" },
+  });
+  const card1 = treeNode("LI", {
+    text: "Functional Test Engineer\nAcme",
+    classes: ["jobs-search-results__list-item"],
+    attributes: { "data-job-id": "4400000001" },
+    children: [link1],
+  });
+  const card2 = treeNode("LI", {
+    text: "Senior QA Engineer\nBeta",
+    classes: ["jobs-search-results__list-item"],
+    children: [link2],
+  });
+  const list = treeNode("UL", { children: [card1, card2] });
+  const apply = treeNode("BUTTON", { text: "Easy Apply", attributes: { "aria-label": "Easy Apply to this job" } });
+  const panel = treeNode("DIV", { classes: ["jobs-search__job-details"], children: [apply] });
+  const root = treeNode("DIV", { children: [list, panel] });
+  const doc = buildDocument(root);
+  const helpers = loadBrowserHelpers({ document: doc });
+
+  const cards = [...helpers.getJobCards()];
+  assert.equal(cards.length, 2);
+  assert.equal(cards[0], card1);
+  assert.equal(cards[1], card2);
+  assert.equal(helpers.getJobDetailPanel(), panel);
+  assert.equal(helpers.getCardJobId(card1), "4400000001");
+  assert.equal(helpers.getCardJobId(card2), "4400000002");
+  assert.equal(helpers.getCardTitle(card1), "Functional Test Engineer");
+  assert.equal(helpers.getCardTitle(card2), "Senior QA Engineer");
+  assert.equal(helpers.findCurrentEasyApplyButton(), apply);
+  assert.equal(helpers.findCurrentExternalApplyButton(), null);
 });
