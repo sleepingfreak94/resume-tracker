@@ -159,7 +159,23 @@
 
   // ── Job card helpers ─────────────────────────────────────────────────────
 
+  const JOB_CARD_KEY_SELECTOR = "[componentkey^='job-card-component-ref-']";
+  const JOB_CARD_BUTTON_SELECTOR = "[role='button'][componentkey^='job-card-component-ref-']";
+
+  function isInsideJobCard(element) {
+    return Boolean(element && typeof element.closest === "function" && element.closest(JOB_CARD_KEY_SELECTOR));
+  }
+
+  function jobIdFromComponentKey(value) {
+    const match = String(value || "").match(/job-card-component-ref-(\d+)/);
+    return match?.[1] || "";
+  }
+
   function getJobCards() {
+    return Array.from(new Set(getJobCardCandidates()));
+  }
+
+  function getJobCardCandidates() {
     return Array.from(document.querySelectorAll([
       "li.jobs-search-results__list-item",
       "li.scaffold-layout__list-item",
@@ -167,6 +183,7 @@
       ".job-card-container",
       ".jobs-search__results-list > li",
       ".jobs-search-results-grid__row-container li",
+      JOB_CARD_BUTTON_SELECTOR,
     ].join(",")));
   }
 
@@ -180,7 +197,9 @@
   function getCardJobId(card) {
     if (!(card instanceof Element)) return "";
     const dataId = card.getAttribute("data-job-id") || card.closest("[data-job-id]")?.getAttribute("data-job-id");
-    return jobIdFromValue(dataId) || jobIdFromValue(card.querySelector("a[href*='/jobs/view/']")?.href);
+    const legacyId = jobIdFromValue(dataId) || jobIdFromValue(card.querySelector("a[href*='/jobs/view/']")?.href);
+    if (legacyId) return legacyId;
+    return jobIdFromComponentKey(card.getAttribute("componentkey") || card.closest(JOB_CARD_KEY_SELECTOR)?.getAttribute("componentkey"));
   }
 
   function getCardByJobId(jobId) {
@@ -229,6 +248,17 @@
   function getCardTitle(card) {
     if (!(card instanceof Element)) return "";
     const link = card.querySelector("a[href*='/jobs/view/']");
+    if (!link) {
+      const firstLine = String(card.innerText || card.textContent || "")
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .find(Boolean) || "";
+      return firstLine
+        .replace(/^Selected,\s*/i, "")
+        .replace(/\s*\(Verified job\)\s*$/i, "")
+        .replace(/\s+/g, " ")
+        .trim();
+    }
     return String(link?.textContent || link?.getAttribute("aria-label") || card.innerText || "").replace(/\s+/g, " ").trim();
   }
 
@@ -299,7 +329,13 @@
       .filter(Boolean)
       .slice(0, 12)
       .join("|");
-    return [title?.textContent, company?.textContent, actions]
+    const titleLink = panel.querySelector([
+      "h1 a[href*='/jobs/view/']",
+      "a.job-details-jobs-unified-top-card__job-title-link[href*='/jobs/view/']",
+      "[class*='job-title'] a[href*='/jobs/view/']",
+    ].join(",")) || findDetailTitleLink();
+    const titleLinkId = jobIdFromValue(titleLink?.href || titleLink?.getAttribute?.("href"));
+    return [title?.textContent, company?.textContent, actions, titleLink?.textContent, titleLinkId]
       .map((value) => String(value || "").replace(/\s+/g, " ").trim())
       .join("::");
   }
@@ -433,6 +469,12 @@
     return style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity) !== 0 && rect.width > 0 && rect.height > 0;
   }
 
+  function findDetailTitleLink() {
+    if (typeof document.querySelectorAll !== "function") return null;
+    return Array.from(document.querySelectorAll("main a[href*='/jobs/view/']"))
+      .find((link) => !isInsideJobCard(link)) || null;
+  }
+
   function getJobDetailPanel() {
     const selectors = [
       ".jobs-search__job-details",
@@ -443,6 +485,21 @@
     for (const selector of selectors) {
       const panel = document.querySelector(selector);
       if (panel) return panel;
+    }
+    const titleLink = findDetailTitleLink();
+    if (titleLink) {
+      const main = document.querySelector("main");
+      let pane = titleLink;
+      while (
+        pane.parentElement &&
+        pane.parentElement !== main &&
+        pane.parentElement !== document.body &&
+        pane.parentElement !== document.documentElement &&
+        !pane.parentElement.querySelector(JOB_CARD_KEY_SELECTOR)
+      ) {
+        pane = pane.parentElement;
+      }
+      if (pane !== titleLink) return pane;
     }
     return document.querySelector("main") || document;
   }
@@ -469,6 +526,7 @@
     return Array.from(scope.querySelectorAll("button, a, [role='button']"))
       .find((el) => {
         if (!isVisible(el) || el.disabled || el.getAttribute("aria-disabled") === "true") return false;
+        if (isInsideJobCard(el)) return false;
         return isLinkedInEasyApplyControl(el);
       }) || null;
   }
@@ -490,6 +548,7 @@
     return Array.from(scope.querySelectorAll("button, a, [role='button']"))
       .find((el) => {
         if (!isVisible(el) || el.disabled || el.getAttribute("aria-disabled") === "true") return false;
+        if (isInsideJobCard(el)) return false;
         const text = easyApplyText(el);
         return !isLinkedInEasyApplyControl(el) && /^(apply|apply now|apply on .+|continue application)\b/i.test(text);
       }) || null;
@@ -1229,6 +1288,13 @@
       submissionIsConfirmed,
       waitForSubmissionResult,
       driveEasyApply,
+      getJobCards,
+      getCardJobId,
+      getCardTitle,
+      getJobDetailPanel,
+      getDetailSignature,
+      findCurrentEasyApplyButton,
+      findCurrentExternalApplyButton,
     };
     window.__rtLinkedInRunActive = false;
     return;
