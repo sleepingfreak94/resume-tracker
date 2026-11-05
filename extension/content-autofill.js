@@ -23,6 +23,9 @@
   const _resumeUploadAttempts = new Map();
   const _resumeValidationTargets = new Map();
   const RESUME_UPLOAD_TARGET_ATTRIBUTE = "data-rt-cdp-upload-token";
+  const RESUME_UPLOAD_GATE_TIMEOUT_MS = 120_000;
+  const RESUME_UPLOAD_GATE_POLL_MS = 250;
+  const RESUME_UPLOAD_GATE_FAILED_REASON = "The tailored résumé upload failed; the previously used résumé may still be selected.";
 
   function root() { return _fillRoot || document; }
 
@@ -894,6 +897,17 @@
       return { state: "final-review", label: action.label };
     }
 
+    // A required tailored résumé must be attached before moving past this step;
+    // LinkedIn pre-selects the older résumé, so the step can look complete.
+    if (settings.require_tailored_resume === true && _armedResumeUpload && !_armedResumeUpload.uploaded) {
+      const gate = await waitForArmedResumeUploadGate();
+      if (!gate.ok) {
+        await clearAutoFillSession();
+        showAutomationMessage(`Résumé not uploaded: ${gate.reason}`, { duration: 0 });
+        return { state: "needs_manual", reason: gate.reason };
+      }
+    }
+
     const proceed = await automationCountdown(settings.wait_seconds, action.label, false);
     if (!proceed) return { state: "cancelled" };
 
@@ -1326,6 +1340,7 @@
         state.failed = true;
         clearInterval(_resumeUploadPollTimer);
         const reason = upload.resumeUploadError;
+        state.failureReason = reason;
         showAutomationMessage(`Resume upload paused: ${reason}`, { duration: 0 });
         return;
       }
@@ -1338,10 +1353,46 @@
       state.failed = true;
       clearInterval(_resumeUploadPollTimer);
       const reason = error instanceof Error ? error.message : String(error);
+      state.failureReason = reason;
       showAutomationMessage(`Resume upload paused: ${reason}`, { duration: 0 });
     } finally {
       _resumeUploadInFlight = false;
     }
+  }
+
+  // Resolves { ok: true } when it is safe to leave this step, or
+  // { ok: false, reason } when the armed tailored-résumé upload failed or is
+  // still in flight at the bound. A probe miss (non-résumé step) leaves the
+  // armed state neither uploaded nor failed and counts as ok.
+  async function waitForArmedResumeUploadGate(timeoutMs = RESUME_UPLOAD_GATE_TIMEOUT_MS) {
+    const failedResult = (armed) => ({ ok: false, reason: armed.failureReason || RESUME_UPLOAD_GATE_FAILED_REASON });
+    const seconds = Math.max(1, Math.round(timeoutMs / 1000));
+    const inProgressResult = () => ({
+      ok: false,
+      reason: `The tailored résumé upload was still in progress after ${seconds} second${seconds === 1 ? "" : "s"}; review the résumé step in LinkedIn manually.`,
+    });
+
+    let armed = _armedResumeUpload;
+    if (!armed || armed.uploaded) return { ok: true };
+    if (armed.failed) return failedResult(armed);
+
+    const deadline = Date.now() + timeoutMs;
+    while (_resumeUploadInFlight && Date.now() < deadline) {
+      const pause = Math.min(RESUME_UPLOAD_GATE_POLL_MS, Math.max(1, deadline - Date.now()));
+      await new Promise((resolve) => setTimeout(resolve, pause));
+    }
+
+    armed = _armedResumeUpload;
+    if (!armed || armed.uploaded) return { ok: true };
+    if (armed.failed) return failedResult(armed);
+    if (_resumeUploadInFlight) return inProgressResult();
+
+    await checkArmedResumeUpload();
+
+    armed = _armedResumeUpload;
+    if (armed?.failed) return failedResult(armed);
+    if (_resumeUploadInFlight) return inProgressResult();
+    return { ok: true };
   }
 
   function armResumeUpload(port, jobId) {
@@ -1781,6 +1832,7 @@
       uploadResumeToVisibleFields,
       armResumeUpload,
       checkArmedResumeUpload,
+      waitForArmedResumeUploadGate,
       disarmResumeUpload,
     };
     return;
