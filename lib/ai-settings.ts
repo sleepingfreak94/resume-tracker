@@ -1,6 +1,6 @@
 import { getSetting, setSetting } from "./db";
 
-export const AI_PROVIDERS = ["openai", "codex", "cursor"] as const;
+export const AI_PROVIDERS = ["claude", "openai", "codex", "cursor"] as const;
 export type AIProvider = (typeof AI_PROVIDERS)[number];
 
 export const OPENAI_MODELS = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] as const;
@@ -9,6 +9,10 @@ export type OpenAIModel = (typeof OPENAI_MODELS)[number];
 export const CODEX_MODELS = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] as const;
 export type CodexModel = (typeof CODEX_MODELS)[number];
 export type CodexAuthStatus = "subscription" | "signed_out" | "api_key" | "unavailable";
+
+export const CLAUDE_MODELS = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"] as const;
+export type ClaudeModel = (typeof CLAUDE_MODELS)[number];
+export type ClaudeAuthStatus = "subscription" | "signed_out" | "api_key" | "unavailable";
 
 export const CURSOR_MODELS = ["composer-2.5-fast", "composer-2.5", "claude-sonnet-5"] as const;
 export type CursorModel = (typeof CURSOR_MODELS)[number];
@@ -23,17 +27,23 @@ export interface AISettings {
   codexGenerationModel: CodexModel;
   codexChatModel: CodexModel;
   codexRoutineModel: CodexModel;
+  claudeGenerationModel: ClaudeModel;
+  claudeChatModel: ClaudeModel;
+  claudeRoutineModel: ClaudeModel;
   reasoningEffort: "high";
 }
 
 export const DEFAULT_AI_SETTINGS: AISettings = {
-  provider: "openai",
+  provider: "claude",
   generationModel: "gpt-5.6-sol",
   chatModel: "gpt-5.6-terra",
   routineModel: "gpt-5.6-luna",
   codexGenerationModel: "gpt-5.6-sol",
   codexChatModel: "gpt-5.6-terra",
   codexRoutineModel: "gpt-5.6-luna",
+  claudeGenerationModel: "claude-opus-5-5",
+  claudeChatModel: "claude-sonnet-5-5",
+  claudeRoutineModel: "claude-haiku-5-5",
   reasoningEffort: "high",
 };
 
@@ -45,13 +55,17 @@ const SETTING_KEYS = {
   codexGenerationModel: "ai_codex_generation_model",
   codexChatModel: "ai_codex_chat_model",
   codexRoutineModel: "ai_codex_routine_model",
+  claudeGenerationModel: "ai_claude_generation_model",
+  claudeChatModel: "ai_claude_chat_model",
+  claudeRoutineModel: "ai_claude_routine_model",
 } as const;
 
 export function isAIProvider(value: unknown): value is AIProvider {
   return typeof value === "string" && (AI_PROVIDERS as readonly string[]).includes(value);
 }
 
-export function aiProviderName(provider: AIProvider): "OpenAI" | "Codex" | "Cursor" {
+export function aiProviderName(provider: AIProvider): "Claude" | "OpenAI" | "Codex" | "Cursor" {
+  if (provider === "claude") return "Claude";
   if (provider === "openai") return "OpenAI";
   if (provider === "codex") return "Codex";
   return "Cursor";
@@ -69,6 +83,10 @@ export function isCodexModel(value: unknown): value is CodexModel {
   return typeof value === "string" && (CODEX_MODELS as readonly string[]).includes(value);
 }
 
+export function isClaudeModel(value: unknown): value is ClaudeModel {
+  return typeof value === "string" && (CLAUDE_MODELS as readonly string[]).includes(value);
+}
+
 export function normalizeAISettings(input: Partial<Record<keyof AISettings, unknown>>): AISettings {
   return {
     provider: isAIProvider(input.provider) ? input.provider : DEFAULT_AI_SETTINGS.provider,
@@ -78,6 +96,9 @@ export function normalizeAISettings(input: Partial<Record<keyof AISettings, unkn
     codexGenerationModel: isCodexModel(input.codexGenerationModel) ? input.codexGenerationModel : DEFAULT_AI_SETTINGS.codexGenerationModel,
     codexChatModel: isCodexModel(input.codexChatModel) ? input.codexChatModel : DEFAULT_AI_SETTINGS.codexChatModel,
     codexRoutineModel: isCodexModel(input.codexRoutineModel) ? input.codexRoutineModel : DEFAULT_AI_SETTINGS.codexRoutineModel,
+    claudeGenerationModel: isClaudeModel(input.claudeGenerationModel) ? input.claudeGenerationModel : DEFAULT_AI_SETTINGS.claudeGenerationModel,
+    claudeChatModel: isClaudeModel(input.claudeChatModel) ? input.claudeChatModel : DEFAULT_AI_SETTINGS.claudeChatModel,
+    claudeRoutineModel: isClaudeModel(input.claudeRoutineModel) ? input.claudeRoutineModel : DEFAULT_AI_SETTINGS.claudeRoutineModel,
     reasoningEffort: "high",
   };
 }
@@ -91,13 +112,23 @@ export function getAISettings(): AISettings {
     codexGenerationModel: getSetting(SETTING_KEYS.codexGenerationModel),
     codexChatModel: getSetting(SETTING_KEYS.codexChatModel),
     codexRoutineModel: getSetting(SETTING_KEYS.codexRoutineModel),
+    claudeGenerationModel: getSetting(SETTING_KEYS.claudeGenerationModel),
+    claudeChatModel: getSetting(SETTING_KEYS.claudeChatModel),
+    claudeRoutineModel: getSetting(SETTING_KEYS.claudeRoutineModel),
   });
 }
 
 export function updateAISettings(input: Partial<Omit<AISettings, "reasoningEffort">>): AISettings {
   if (input.provider !== undefined) {
-    if (!isAIProvider(input.provider)) throw new Error("Provider must be OpenAI, Codex, or Cursor");
+    if (!isAIProvider(input.provider)) throw new Error("Provider must be Claude, OpenAI, Codex, or Cursor");
     setSetting(SETTING_KEYS.provider, input.provider);
+  }
+  for (const key of ["claudeGenerationModel", "claudeChatModel", "claudeRoutineModel"] as const) {
+    const value = input[key];
+    if (value !== undefined) {
+      if (!isClaudeModel(value)) throw new Error(`Invalid Claude model for ${key}`);
+      setSetting(SETTING_KEYS[key], value);
+    }
   }
   for (const key of ["codexGenerationModel", "codexChatModel", "codexRoutineModel"] as const) {
     const value = input[key];
@@ -120,6 +151,12 @@ export function codexModelForWorkload(settings: AISettings, workload: AIWorkload
   if (workload === "generation") return settings.codexGenerationModel;
   if (workload === "chat") return settings.codexChatModel;
   return settings.codexRoutineModel;
+}
+
+export function claudeModelForWorkload(settings: AISettings, workload: AIWorkload): ClaudeModel {
+  if (workload === "generation") return settings.claudeGenerationModel;
+  if (workload === "chat") return settings.claudeChatModel;
+  return settings.claudeRoutineModel;
 }
 
 export function openAIModelForWorkload(settings: AISettings, workload: AIWorkload): OpenAIModel {
